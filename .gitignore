@@ -1,0 +1,216 @@
+# ============================================================
+# Python / cache / build
+# ============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.pyc
+.pyo
+.pyd
+.eggs/
+build/
+dist/
+.installed.cfg
+
+# ============================================================
+# Jupyter
+# ============================================================
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+profile_default/
+
+# ============================================================
+# IDE / editor
+# ============================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+.DS_Store
+Thumbs.db
+
+# ============================================================
+# Testing / coverage
+# ============================================================
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+.nox/
+.cache
+.mypy_cache/
+.ruff_cache/
+
+# ============================================================
+# Model weights / tensors
+# ============================================================
+*.npy
+*.npz
+*.pkl
+*.joblib
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.h5
+*.hdf5
+
+# ============================================================
+# Temp / draft
+# ============================================================
+*.tmp
+*.bak
+*~
+*.log
+*.lock
+
+# ============================================================
+# results_xxx/ — only 5 paper-promised directories are whitelisted
+# ============================================================
+results_902_cho_diagnostic/
+results_best_pipeline/
+results_external_validation/
+results_groupkfold_validation/
+results_hierarchical_model/
+results_lambda_ablation/
+results_mechanism/
+results_pcl_ae/
+results_pcl_ae_fair_comparison/
+results_pcl_ae_perfold/
+results_pcl_ae_viz/
+results_permuted_ablation_v2/
+results_permuted_ablation_v3_controls/
+results_publication_bias_sensitivity_REMOVED/
+results_ranking_metrics/
+results_sample_size_sensitivity/
+results_statistical_test/
+results_step4/
+results_step4_5/
+results_step4_5_v2/
+results_step5/
+results_step7_improved_loso/
+results_transferability/
+results_virtual_screening/
+results/
+
+# 5 paper-promised artefacts
+!results_honest_groupkfold/**
+!results_external_holdout/**
+!results_pcl_ae_fair_comparison_multiseed/**
+!results_substrate_catalyst_matrix/**
+!results_permuted_ablation/**
+
+# ============================================================
+# data/
+# ============================================================
+data/raw/
+data/external/
+
+!data/processed/**
+
+# ============================================================
+# figures/ — only paper English figures + SVG logos
+# ============================================================
+figures/*.pdf
+figures/*.svg
+figures/*_zh.*
+figures/fig1_protocol_comparison_v3.*
+figures/fig2_loso_quality_v3.*
+figures/fig3_coverage_5x5_v3.*
+figures/fig4_shap_per_substrate_v3.*
+figures/fig5_homo_vs_yield_v3.*
+figures/fig5_loso_protocol.*
+figures/test_*
+figures/si_fig_*.png
+
+# paper figures
+!figures/fig0_graphical_abstract_en.png
+!figures/fig0_graphical_abstract_en.pdf
+!figures/fig1_data_overview_en.png
+!figures/fig1_data_overview_en.pdf
+!figures/fig1_protocol_comparison_en.png
+!figures/fig1_protocol_comparison_en.pdf
+!figures/fig2_loso_root_cause_en.png
+!figures/fig2_loso_root_cause_en.pdf
+!figures/fig3_coverage_matrix_en.png
+!figures/fig3_coverage_matrix_en.pdf
+!figures/fig4_shap_direction_en.png
+!figures/fig4_shap_direction_en.pdf
+!figures/fig5_ablation_en.png
+!figures/fig5_ablation_en.pdf
+!figures/fig6_latent_space_en.png
+!figures/fig6_latent_space_en.pdf
+
+# ============================================================
+# dft_validation/
+# ============================================================
+dft_validation/sp_5_subs/
+dft_validation/ige_ts/
+dft_validation/ts_5_substrates/
+dft_validation/extended/
+dft_validation/inputs/
+dft_validation/results/
+dft_validation/scripts/
+dft_validation/xtb_outputs/
+*.out
+*.gbw
+*.opt
+*.densities
+*.tmp
+*.pc_charges
+*.molden
+*.hess
+*.hessian
+
+# paper-promised
+!dft_validation/loso_kl_divergence.csv
+
+# ============================================================
+# docs/
+# ============================================================
+docs/CODE_AUDIT.md
+docs/INDEX.md
+docs/PIPELINE.md
+docs/PROOFREAD_PROMPT.md
+docs/RESULTS.md
+docs/reference_citation_analysis.md
+docs/paper/
+docs/pipeline_notes/
+docs/supplementary/
+
+# ============================================================
+# src/analysis/ — only paper-promised scripts
+# ============================================================
+src/analysis/honest_groupkfold_ablation.py
+src/analysis/pcl_ae_fair_comparison.py
+src/analysis/pcl_ae_perfold_retrain.py
+src/analysis/permuted_feature_ablation.py
+src/analysis/_main_with_seed.py
+src/analysis/_verify_split_v2.py
+src/analysis/_verify_split_v3.py
+src/analysis/regenerate_loso_predictions.py
+src/analysis/loso/
+
+# paper-promised
+!src/analysis/pcl_ae_fair_comparison_multiseed.py
+!src/analysis/external_holdout_multiseed_v2.py
+
+# ============================================================
+# scripts/ — not in paper
+# ============================================================
+scripts/
+scripts/hooks/
+logs/
+references/
+push_to_github.ps1
+
+# ============================================================
+# assets/
+# ============================================================
+assets/molecular_structures/

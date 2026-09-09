@@ -1,0 +1,26 @@
+========================================================================
+  External Holdout — Multi-Seed Validation (v2, legacy-RNG shuffle)
+========================================================================
+Model        : PCL-AE-128 + DualANN (the model that gave R²=0.071)
+Seeds        : [42, 2026, 2024, 9999]
+Train pool   : 2116 rows (filtered from 2490 by extraction_status == valid, yield > 0, no NaN)
+Holdout frac : 15%
+Shuffle API  : np.random.seed(seed) + np.random.shuffle(np.arange(n))
+              (matches 405_external_validation.main() EXACTLY)
+Total time   : 25.2 min
+
+    seed          r2         mae    n_test
+  --------------------------------------------
+      42      0.1885      0.1350       317
+    2026     -0.0113      0.1439       317
+    2024      0.2777      0.1269       317
+    9999      0.0698      0.1300       317
+  --------------------------------------------
+R²  : mean = 0.1311, std (ddof=1) = 0.1276
+MAE : mean = 0.1340, std (ddof=1) = 0.0074
+
+Reference (paper single-seed value):
+  seed=2026:  R²=0.0711, MAE=0.1436, n_test=317
+
+Saved: D:\machine-learning\CO2-cycloaddition\results_external_holdout\multiseed_v2_summary.csv
+========================================================================

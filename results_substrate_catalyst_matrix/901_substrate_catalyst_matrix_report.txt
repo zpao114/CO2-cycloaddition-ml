@@ -1,0 +1,85 @@
+======================================================================
+901 — Substrate x Catalyst Family Diagnostic Matrix
+======================================================================
+Generated: 2026-08-21T04:21:45.086373+00:00
+Dataset  : D:\machine-learning\CO2-cycloaddition\results\results_cho_diagnostic\co2_drfp_xtb_extended.csv
+N total  : 2490 valid rows after cleaning
+Split    : holdout seed=2026 test_size=0.15 (2116/374); kfold seed=2026 n_splits=5
+
+Substrates        (5 expected, 5 present):
+  - Styrene oxide
+  - Epichlorohydrin
+  - Propylene oxide
+  - Cyclohexene oxide
+  - Isopropyl glycidyl ether
+
+Catalyst families (after aggregation; sparse labels merged into 'other'):
+  - ionic_liquid
+  - metal_halide
+  - mixed_system
+  - other
+
+Mean yield (%) per cell:
+  Styrene oxide                  | ionic_liquid    | n= 618  |  84.95%  CI[83.45, 86.32]
+  Styrene oxide                  | metal_halide    | n=  62  |  87.09%  CI[83.66, 90.31]
+  Styrene oxide                  | mixed_system    | n=  49  |  79.21%  CI[72.59, 85.05]
+  Styrene oxide                  | other           | n=  54  |  79.67%  CI[73.89, 85.17]
+  Epichlorohydrin                | ionic_liquid    | n= 531  |  92.38%  CI[91.44, 93.24]
+  Epichlorohydrin                | metal_halide    | n=  50  |  89.79%  CI[85.92, 92.96]
+  Epichlorohydrin                | mixed_system    | n=  56  |  91.52%  CI[88.29, 94.28]
+  Epichlorohydrin                | other           | n=  55  |  89.97%  CI[85.56, 93.30]
+  Propylene oxide                | ionic_liquid    | n= 504  |  89.90%  CI[88.54, 91.29]
+  Propylene oxide                | metal_halide    | n=  51  |  89.13%  CI[83.59, 93.63]
+  Propylene oxide                | mixed_system    | n=  39  |  76.29%  CI[67.39, 84.87]
+  Propylene oxide                | other           | n=  52  |  81.52%  CI[74.52, 87.61]
+  Cyclohexene oxide              | ionic_liquid    | n= 243  |  54.28%  CI[50.58, 57.80]
+  Cyclohexene oxide              | metal_halide    | n=  28  |  39.96%  CI[28.50, 51.86]
+  Cyclohexene oxide              | mixed_system    | n=  14  |  50.80%  CI[34.94, 67.34]
+  Cyclohexene oxide              | other           | n=  20  |  59.40%  CI[47.03, 71.09]
+  Isopropyl glycidyl ether       | ionic_liquid    | n=  44  |  89.48%  CI[86.39, 92.39]
+  Isopropyl glycidyl ether       | metal_halide    | n=   8  |  95.62%  CI[92.38, 98.62]
+  Isopropyl glycidyl ether       | mixed_system    | n=   3  |  86.33%  CI[73.00, 97.00]
+  Isopropyl glycidyl ether       | other           | n=   9  |  96.00%  CI[94.11, 97.67]
+
+Per-cell SHAP (top-3) for 16 cells with n_shap >= 20:
+  Styrene oxide                  | ionic_liquid    | n_shap=618 | top1=sub_homo_eV (0.0489)  top2=sub_lumo_eV (0.0122)  top3=time_log (0.0098)
+  Styrene oxide                  | metal_halide    | n_shap= 62 | top1=sub_homo_eV (0.0519)  top2=sub_lumo_eV (0.0118)  top3=time_log (0.0112)
+  Styrene oxide                  | mixed_system    | n_shap= 49 | top1=sub_homo_eV (0.0491)  top2=time_log (0.0173)  top3=sub_lumo_eV (0.0152)
+  Styrene oxide                  | other           | n_shap= 54 | top1=sub_homo_eV (0.0498)  top2=time_log (0.0130)  top3=sub_lumo_eV (0.0129)
+  Epichlorohydrin                | ionic_liquid    | n_shap=531 | top1=sub_homo_eV (0.0460)  top2=temperature (0.0145)  top3=time_log (0.0098)
+  Epichlorohydrin                | metal_halide    | n_shap= 50 | top1=sub_homo_eV (0.0512)  top2=time_log (0.0175)  top3=temperature (0.0103)
+  Epichlorohydrin                | mixed_system    | n_shap= 56 | top1=time_log (0.0545)  top2=sub_homo_eV (0.0432)  top3=cat_dipole_D (0.0343)
+  Epichlorohydrin                | other           | n_shap= 55 | top1=sub_homo_eV (0.0453)  top2=time_log (0.0232)  top3=cat_dipole_D (0.0152)
+  Propylene oxide                | ionic_liquid    | n_shap=504 | top1=sub_homo_eV (0.0514)  top2=sub_lumo_eV (0.0229)  top3=temperature (0.0169)
+  Propylene oxide                | metal_halide    | n_shap= 51 | top1=sub_homo_eV (0.0550)  top2=sub_lumo_eV (0.0259)  top3=time_log (0.0186)
+  Propylene oxide                | mixed_system    | n_shap= 39 | top1=sub_homo_eV (0.0572)  top2=sub_lumo_eV (0.0348)  top3=time_log (0.0243)
+  Propylene oxide                | other           | n_shap= 52 | top1=sub_homo_eV (0.0511)  top2=sub_lumo_eV (0.0308)  top3=time_log (0.0224)
+  Cyclohexene oxide              | ionic_liquid    | n_shap=243 | top1=temperature (0.0084)  top2=time_log (0.0082)  top3=sub_dipole_D (0.0075)
+  Cyclohexene oxide              | metal_halide    | n_shap= 28 | top1=time_log (0.0116)  top2=sub_dipole_D (0.0080)  top3=sub_lumo_eV (0.0062)
+  Cyclohexene oxide              | other           | n_shap= 20 | top1=time_log (0.0143)  top2=sub_dipole_D (0.0132)  top3=sub_lumo_eV (0.0070)
+  Isopropyl glycidyl ether       | ionic_liquid    | n_shap= 44 | top1=temperature (0.0175)  top2=sub_homo_eV (0.0135)  top3=pressure (0.0124)
+
+Per-system SHAP (families with n >= 20):
+  sub_homo_eV                     | ionic_liquid=0.0423  metal_halide=0.0442  mixed_system=0.0445  other=0.0421
+  time_log                        | ionic_liquid=0.0106  metal_halide=0.0150  mixed_system=0.0326  other=0.0189
+  sub_lumo_eV                     | ionic_liquid=0.0113  metal_halide=0.0118  mixed_system=0.0146  other=0.0138
+  cat_dipole_D                    | ionic_liquid=0.0047  metal_halide=0.0074  mixed_system=0.0203  other=0.0109
+  temperature                     | ionic_liquid=0.0120  metal_halide=0.0094  mixed_system=0.0096  other=0.0090
+  pressure                        | ionic_liquid=0.0062  metal_halide=0.0073  mixed_system=0.0174  other=0.0082
+  delta_E_LL                      | ionic_liquid=0.0044  metal_halide=0.0074  mixed_system=0.0108  other=0.0068
+  has_solvent                     | ionic_liquid=0.0039  metal_halide=0.0045  mixed_system=0.0051  other=0.0057
+
+Outputs:
+  - cho_summary.csv
+  - heatmap_n.pdf
+  - heatmap_n.png
+  - heatmap_yield.pdf
+  - heatmap_yield.png
+  - matrix_yield_ci.csv
+  - matrix_yield_ci.xlsx
+  - matrix_yield_ci_5x5.csv
+  - per_cell_shap.csv
+  - per_system_shap.csv
+  - per_system_shap_heatmap.pdf
+  - per_system_shap_heatmap.png
+  - per_system_shap_long.csv

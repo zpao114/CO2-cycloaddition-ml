@@ -1,0 +1,16 @@
+﻿seed,reactant_name,n_test_in_substrate,mean_yield
+42,Cyclohexene oxide,42,52.778571428571425
+42,Epichlorohydrin,89,90.42808988764045
+42,Isopropyl glycidyl ether,13,95.6923076923077
+42,Propylene oxide,83,89.94253012048192
+42,Styrene oxide,90,85.89333333333333
+2026,Cyclohexene oxide,36,49.44388888888889
+2026,Epichlorohydrin,89,92.77191011235956
+2026,Isopropyl glycidyl ether,7,92.0
+2026,Propylene oxide,85,86.95376470588235
+2026,Styrene oxide,100,86.6899
+9999,Cyclohexene oxide,37,53.24864864864865
+9999,Epichlorohydrin,96,93.02166666666666
+9999,Isopropyl glycidyl ether,9,93.26666666666667
+9999,Propylene oxide,73,89.26986301369863
+9999,Styrene oxide,102,83.46980392156863

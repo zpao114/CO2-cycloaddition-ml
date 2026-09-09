@@ -1,0 +1,21 @@
+﻿reactant,catalyst_family,n_shap,top1_feature,top1_mean_abs_shap,top2_feature,top2_mean_abs_shap,top3_feature,top3_mean_abs_shap,note
+Styrene oxide,ionic_liquid,618,sub_homo_eV,0.04886588065140548,sub_lumo_eV,0.01218103273910342,time_log,0.009762836377208699,
+Styrene oxide,metal_halide,62,sub_homo_eV,0.051919777847586085,sub_lumo_eV,0.011830139800064938,time_log,0.011234851471418767,
+Styrene oxide,mixed_system,49,sub_homo_eV,0.04910524379538026,time_log,0.017279230345667727,sub_lumo_eV,0.015189917187909638,
+Styrene oxide,other,54,sub_homo_eV,0.049847096963613086,time_log,0.012992915210176068,sub_lumo_eV,0.012920050045337342,
+Epichlorohydrin,ionic_liquid,531,sub_homo_eV,0.046048115837175475,temperature,0.014465369606734094,time_log,0.009832080710101443,
+Epichlorohydrin,metal_halide,50,sub_homo_eV,0.05121408566832538,time_log,0.01750664193503321,temperature,0.010261794411926482,
+Epichlorohydrin,mixed_system,56,time_log,0.054548738250559795,sub_homo_eV,0.043205759421523084,cat_dipole_D,0.034322953163479816,
+Epichlorohydrin,other,55,sub_homo_eV,0.04531036422333931,time_log,0.023226932508722754,cat_dipole_D,0.015223591541871377,
+Propylene oxide,ionic_liquid,504,sub_homo_eV,0.05139219788612705,sub_lumo_eV,0.022868531645231255,temperature,0.016949858032733394,
+Propylene oxide,metal_halide,51,sub_homo_eV,0.054954560583128614,sub_lumo_eV,0.025871998749162007,time_log,0.018623937655659114,
+Propylene oxide,mixed_system,39,sub_homo_eV,0.057225755487497004,sub_lumo_eV,0.0348108447132966,time_log,0.024319709786094486,
+Propylene oxide,other,52,sub_homo_eV,0.0511050219289385,sub_lumo_eV,0.030845434637740213,time_log,0.022424462345392897,
+Cyclohexene oxide,ionic_liquid,243,temperature,0.008357500232259769,time_log,0.008166176102884878,sub_dipole_D,0.007512946169030009,
+Cyclohexene oxide,metal_halide,28,time_log,0.01157796937435959,sub_dipole_D,0.007974887316647328,sub_lumo_eV,0.0061764026104355685,
+Cyclohexene oxide,mixed_system,14,,,,,,,n<20; SHAP skipped
+Cyclohexene oxide,other,20,time_log,0.01431346595636564,sub_dipole_D,0.013157228333875495,sub_lumo_eV,0.007008636917453201,
+Isopropyl glycidyl ether,ionic_liquid,44,temperature,0.01752869594863357,sub_homo_eV,0.013496475492667531,pressure,0.012403165846163439,
+Isopropyl glycidyl ether,metal_halide,8,,,,,,,n<20; SHAP skipped
+Isopropyl glycidyl ether,mixed_system,3,,,,,,,n<20; SHAP skipped
+Isopropyl glycidyl ether,other,9,,,,,,,n<20; SHAP skipped
