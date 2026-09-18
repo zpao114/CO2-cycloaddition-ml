@@ -150,7 +150,26 @@ figures/si_fig_*.png
 # ============================================================
 # dft_validation/
 # ============================================================
-dft_validation/sp_5_subs/
+dft_validation/sp_5_subs/sp_*.inp
+dft_validation/sp_5_subs/*.xyz
+dft_validation/sp_5_subs/*.property.txt
+dft_validation/sp_5_subs/sp_5_subs_summary.csv
+dft_validation/sp_5_subs/_*.py
+dft_validation/sp_5_subs/_*.sh
+dft_validation/sp_5_subs/check_*.sh
+dft_validation/sp_5_subs/copy_*
+dft_validation/sp_5_subs/debug_*.sh
+dft_validation/sp_5_subs/extract_*.py
+dft_validation/sp_5_subs/find_*.sh
+dft_validation/sp_5_subs/gen_*.py
+dft_validation/sp_5_subs/get_*.sh
+dft_validation/sp_5_subs/make_*.py
+dft_validation/sp_5_subs/parse_*.py
+dft_validation/sp_5_subs/run_*.sh
+dft_validation/sp_5_subs/test_*.sh
+dft_validation/sp_5_subs/write_*.py
+dft_validation/sp_5_subs/finalize_*.py
+dft_validation/sp_5_subs/inp_inline*/
 dft_validation/ige_ts/
 dft_validation/ts_5_substrates/
 dft_validation/extended/
@@ -170,6 +189,7 @@ dft_validation/xtb_outputs/
 
 # paper-promised
 !dft_validation/loso_kl_divergence.csv
+!dft_validation/sp_5_subs/sp_5_subs_summary_v2.csv
 
 # ============================================================
 # docs/
@@ -197,6 +217,11 @@ src/analysis/_verify_split_v3.py
 src/analysis/regenerate_loso_predictions.py
 src/analysis/loso/
 
+# Author/Cursor docx-conversion workflow (kept locally only, never commit)
+src/analysis/diagnostics/convert_paper_to_docx.py
+src/analysis/diagnostics/convert_paper_to_docx_zh.py
+src/analysis/diagnostics/convert_si_to_docx.py
+
 # paper-promised
 !src/analysis/pcl_ae_fair_comparison_multiseed.py
 !src/analysis/external_holdout_multiseed_v2.py
@@ -214,3 +239,16 @@ push_to_github.ps1
 # assets/
 # ============================================================
 assets/molecular_structures/
+
+# ============================================================
+# Author-local helpers / debug (kept locally only, never commit)
+# ============================================================
+_cols.txt
+_diag.txt
+"sp_*.out *"
+fix_limitations.py
+rewrite_s7.py
+figures/fig6_energy_levels_en.py
+figures/fig7_latent_space_en.py
+tools/
+configs/

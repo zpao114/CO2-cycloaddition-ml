@@ -27,7 +27,7 @@ the 5 that are explicitly referenced in the paper.
 | `configs/` | Tuned hyperparameters, data registry, model artifact registry (templates only) |
 | `data/` | Cleaned and processed data (CSVs) |
 | `figures/` | Paper figures (PDF + PNG), English version only |
-| `dft_validation/` | ORCA / xTB validation set: KL divergence summary only |
+| `dft_validation/` | ORCA / xTB validation set: KL divergence summary + raw ORCA / xTB outputs (SI §S7.8 documents the `mult = 2` setup caveat on the five-substrate B3LYP-D3BJ/def2-TZVP single-point energies) |
 | `results_honest_groupkfold/` | Honest GroupKFold paired-seed audit (§3.1) |
 | `results_external_holdout/` | External-holdout multiseed results (§3.2) |
 | `results_pcl_ae_fair_comparison_multiseed/` | PCL-AE fair-comparison multiseed (§3.3) |
@@ -188,7 +188,8 @@ Paper figures in English (PDF + PNG + SVG):
 | `fig3_coverage_matrix_en` | Substrate × catalyst coverage |
 | `fig4_shap_direction_en` | Per-substrate SHAP attribution |
 | `fig5_ablation_en` | Feature ablation results |
-| `fig6_latent_space_en` | PCL-AE latent space |
+| `fig6_energy_levels_en` | Five-substrate DFT energy levels (canonical v2 source) |
+| `fig7_latent_space_en` | PCL-AE latent space (128-D, post-fair-comparison) |
 
 ---
 
@@ -196,6 +197,10 @@ Paper figures in English (PDF + PNG + SVG):
 
 KL divergence summary between DFT and xTB HOMO energies for the
 validation set.  Raw ORCA / xTB outputs are not included.
+
+**SP single-point DFT cross-check (current v2 source).** The five-archived-geometry single-point energies and NBO results in `dft_validation/sp_5_subs/sp_5_subs_summary_v2.csv` (the canonical "CHO gap 0.6344 eV" numbers; PO/ECH/IGE gaps 5.20–5.42 eV; SO gap 4.02 eV; LUMO-driven gap shift on CHO) were computed with `* xyzfile -1 1` (charge = −1, mult = 1, closed-shell anion singlet) at the B3LYP-D3BJ/def2-TZVP/SMD(DMSO) level using ORCA 6.1.1. All five SCFs are `fully_converged`. The v2 SP inputs are documented in SI §S7.8 (input templates `sp_*_v2.inp`); the table and per-substrate diagnostics are in SI §S7.6. For the raw `.out` files, NBO populations, NPA charges, and bond orders that underlie the v2 summary table, see SI §S7.6 and §S7.7 of [docs/supplementary/S7_ige_transition_state.md](docs/supplementary/S7_ige_transition_state.md) (the supplementary materials accompanying this manuscript).
+
+**The DFT line therefore does not contribute to the main-text CHO distinctiveness claim**, which rests on the SHAP sign reversal and KL divergence (§3.3 of the paper). The full discussion of the v2 SCF protocol and the geometry-status caveat is in **SI §S7.6, §S7.7 and §S7.8** of [docs/supplementary/S7_ige_transition_state.md](docs/supplementary/S7_ige_transition_state.md). Future work is to repeat the TS optimisation for CHO and SO from longer initial Br–C distances with GFN-FF pre-optimisation, then re-assess CHO's frontier-orbital position at full SCF and geometry convergence.
 
 | File | Contents |
 |------|----------|
@@ -233,41 +238,67 @@ and set `ORCA_PATH` in `configs/project.yaml`.
 
 ## Key results (headline)
 
-2,316 CO2 cycloaddition reactions across 5 substrates and 5 catalyst
-mechanism classes.
+2,490 CO2 cycloaddition reactions across 5 substrates and 5 catalyst
+mechanism classes (`data/processed/cleaned.csv`, extraction_status='valid').
 
 | Substrate | n | Mean yield | Unique catalysts |
 |-----------|---|------------|------------------|
-| Styrene oxide | 729 | 85.0% | 84 |
-| Epichlorohydrin | 640 | 92.6% | 78 |
-| Propylene oxide | 605 | 89.8% | 71 |
-| Cyclohexene oxide | 289 | 53.8% | 45 |
-| Isopropyl glycidyl ether | 53 | 89.2% | 17 |
+| Styrene oxide | 783 | 84.4% | 83 |
+| Epichlorohydrin | 692 | 91.9% | 73 |
+| Propylene oxide | 646 | 88.3% | 78 |
+| Cyclohexene oxide | 305 | 53.1% | 47 |
+| Isopropyl glycidyl ether | 64 | 91.0% | 30 |
 
 Model performance on the headline protocols:
 
 | Protocol | Model | R² | Notes |
 |----------|-------|-----|-------|
 | 5-fold KFold | DualBranchANN | 0.4106 | MAE = 0.116 |
-| External holdout (15%) | RF | 0.391 | n = 347 |
+| External holdout (15%, single seed=2026) | RF | 0.119 | n = 317 (per `results_external_validation/external_validation_results.csv`) |
+| External holdout (15%, 4-seed mean) | PCL-AE-128 + DualANN | +0.131 ± 0.128 | n = 317 (per `results_external_holdout/multiseed_v2_summary.csv`); 95% CI [−0.072, +0.334] |
+| Year-OOD (train ≤2021, test ≥2022) | RF | +0.425 ± 0.002 | n_train=1,499, n_test=942 (per `results/results_si/year_ood_benchmark.csv`) |
 | y-randomization (100 perms) | All models | p < 0.01 | Signal is real |
 
 **LOSO failure is structurally robust.** Cyclohexene oxide (CHO, mean
-yield 53.8%) sits in a different yield regime than the terminal epoxides
-(mean yield ~88%) and drives LOSO failure across all four model
-architectures tested (XGB, LGBM, RF, DualBranchANN):
+yield 53.1%) sits in a different yield regime than the terminal epoxides
+(mean yield ~88%) and drives LOSO failure. From
+`results_step4/summary_protocol.csv` (XGBoost proxy; X1_xTB+mech is the
+canonical feature set used in this paper):
 
-| Protocol | XGB | LGBM | RF | DualANN |
-|----------|-----|------|-----|---------|
-| LOSO | -0.441 | -0.519 | -2.300 | -5.031 |
-| LOMO | +0.153 | +0.063 | +0.072 | +0.094 |
+| Protocol | R² | MAE | n_train / n_test |
+|----------|-----|-----|------------------|
+| 5-fold KFold (baseline) | +0.279 | 12.44 | 1992 / 2490 |
+| **LOSO** | **−0.063** | 14.34 | 1992 / 2490 |
+| LOMO | +0.075 | 14.69 | 1867 / 2490 |
+| LOSO × LOMO | +0.203 | 13.41 | 2344 / 2470 |
 
-Bootstrap 95% CI (B = 1000):
+For the X0_xTB_only feature set the numbers are nearly identical (LOSO
+R² ≈ −0.068, LOMO R² ≈ +0.072, LOSO×LOMO R² ≈ +0.195).
 
-| Protocol | R² mean | 95% CI |
-|----------|---------|--------|
-| LOSO (xTB only) | -0.051 | [-0.082, -0.018] |
-| LOSO ∪ LOMO | +0.217 | [+0.178, +0.258] |
+Bootstrap 95% CI (B = 1000, per-substrate residuals; from §S3.3
+`docs/supplementary/S3_protocol_matrix.md`):
+
+| Protocol | mean R² | 95% CI | Half-width |
+|----------|---------|--------|------------|
+| LOSO (xTB only) | −0.068 | [−0.100, −0.036] | 0.032 |
+| LOSO (xTB + mech) | −0.063 | [−0.096, −0.030] | 0.033 |
+| LOSO × LOMO (xTB only) | +0.195 | [+0.155, +0.235] | 0.040 |
+
+Both LOSO CIs lie entirely below zero (X0 upper bound −0.036 < 0),
+confirming the failure is statistically significant.
+
+> **Note:** An earlier draft of this README, alongside the corresponding
+> section in `docs/RESULTS.md`, included a 4-model × 4-cell per-model
+> LOSO/LOMO table (XGB −0.441, LGBM −0.519, RF −2.300, DualBranchANN
+> −5.031) and a Bootstrap 95% CI block with `LOSO mean=−0.051,
+> LOSO×LOMO mean=+0.217`. These numbers were sourced from an early
+> baseline run that is no longer reproducible (`docs/supplementary/
+> S3_4_model_benchmark_full.md` documents the discrepancy and supersedes
+> them). They have been removed in this revision; the per-protocol
+> aggregate numbers above are the canonical XGBoost-proxy results from
+> `results_step4/summary_protocol.csv`. If a per-model LOSO comparison
+> is needed, re-run `src/analysis/loso/700_loso_lomo_cv.py` across the
+> four architectures.
 
 ---
 
