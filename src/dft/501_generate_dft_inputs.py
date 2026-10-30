@@ -32,7 +32,7 @@ except ImportError:
     RDKIT_AVAILABLE = False
 
 
-WORK_DIR_DEFAULT = r"D:\machine-learning\CO2-cycloaddition\dft_validation"
+WORK_DIR_DEFAULT = str(__import__("pathlib").Path(__file__).resolve().parents[2] / "dft_validation")
 ORCA_EXE_DEFAULT = r"D:\orca\Orca6.1.Win64.exe"
 
 # Calculation levels mirror the ORCA manual recommendations:

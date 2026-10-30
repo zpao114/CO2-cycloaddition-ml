@@ -43,10 +43,11 @@ warnings.filterwarnings('ignore')
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold  # noqa: F401  (kept for legacy callers; not used in canonical 5-fold CV paths)
-from src.data_split import load_manifest, holdout_arrays, kfold_folds, split_iterator
+from src.data_split import (load_manifest, holdout_arrays, kfold_folds, split_iterator,
+                            select_train_pool, verify_manifest)
 
 import os as _os
-_proj = _os.environ.get("CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition")
+_proj = _os.environ.get("CO2_PROJECT_ROOT", _os.path.abspath(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..")))
 import sys as _sys
 _sys.path.insert(0, _os.path.join(_proj, 'src'))
 from config import BEST_LAMBDA_PROP
@@ -63,9 +64,10 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition")
+PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 sys.path.insert(0, PROJECT_ROOT)
 from utils_rxn import read_drfp
+from utils_features import require_cond_cols
 
 DATA_EXTENDED = os.path.join(PROJECT_ROOT, 'results/results_cho_diagnostic/co2_drfp_xtb_extended.csv')
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'results_best_pipeline')
@@ -116,9 +118,9 @@ def load_data(drfp_variant='full', use_holdout_train=True):
     df = df[df['yield (%)'] > 0].reset_index(drop=True)
 
     if use_holdout_train:
-        train_idx, _, _ = holdout_arrays(load_manifest())
-        df = df.iloc[sorted(train_idx)].reset_index(drop=True)
-        print(f'  [load_data] filtered to holdout train pool: {len(df)} rows')
+        # verifies row count / row_id order / SHA-256 data hash before indexing by position
+        df = select_train_pool(df, load_manifest())
+        print(f'  [load_data] filtered to holdout train pool: {len(df)} rows (manifest verified)')
 
     n = len(df)
     print(f'  Valid samples: {n}')
@@ -152,10 +154,7 @@ def load_data(drfp_variant='full', use_holdout_train=True):
     X_xtb = np.nan_to_num(X_xtb_raw, nan=0.0)
     print(f'  XTB full: {X_xtb.shape[1]}D  ({len(xtb_cols)} cols)')
 
-    cond_cols = ['temperature (C)', 'pressure (MPa)', 'time (h)']
-    cat_loading_cols = [c for c in df.columns if 'loading_mol%' in c]
-    cond_cols = cond_cols + cat_loading_cols
-    cond_cols = [c for c in cond_cols if c in df.columns]
+    cond_cols = require_cond_cols(df, include_loading=True)
     X_cond = np.nan_to_num(df[cond_cols].values.astype(np.float32), nan=0.0)
     print(f'  Conditions: {X_cond.shape[1]}D')
 
@@ -213,55 +212,16 @@ def X_inter_base(X_xtb, X_cond):
 # =============================================================
 # Standard auto-encoder
 # =============================================================
-class StandardAE(nn.Module):
-    def __init__(self, input_dim, latent_dim):
-        super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 512), nn.BatchNorm1d(512), nn.ReLU(), nn.Dropout(0.2),
-            nn.Linear(512, 256), nn.BatchNorm1d(256), nn.ReLU(), nn.Dropout(0.1),
-            nn.Linear(256, latent_dim),
-        )
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 256), nn.ReLU(),
-            nn.Linear(256, 512), nn.BatchNorm1d(512), nn.ReLU(),
-            nn.Linear(512, input_dim),
-        )
+# --- canonical definitions live in eval_protocol (de-duplicated) ---
+from eval_protocol.nets import (StandardAE, PropertyCoLearningAE,  # noqa: E402,F401
+                                train_standard_ae, train_pcl_ae, encode_with_model)
+from eval_protocol.models import DualBranchANN  # noqa: E402,F401
 
-    def forward(self, x):
-        return self.decoder(self.encoder(x))
-
-    def encode(self, x):
-        return self.encoder(x)
 
 
 # =============================================================
 # Property Co-learning AE (Standard)
 # =============================================================
-class PropertyCoLearningAE(nn.Module):
-    def __init__(self, input_dim, latent_dim):
-        super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 512), nn.BatchNorm1d(512), nn.ReLU(), nn.Dropout(0.2),
-            nn.Linear(512, 256), nn.BatchNorm1d(256), nn.ReLU(), nn.Dropout(0.1),
-            nn.Linear(256, latent_dim),
-        )
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 256), nn.ReLU(),
-            nn.Linear(256, 512), nn.BatchNorm1d(512), nn.ReLU(),
-            nn.Linear(512, input_dim), nn.Sigmoid(),
-        )
-        self.predictor = nn.Sequential(
-            nn.Linear(latent_dim, 64), nn.ReLU(), nn.Dropout(0.1),
-            nn.Linear(64, 32), nn.ReLU(),
-            nn.Linear(32, 1),
-        )
-
-    def forward(self, x):
-        z = self.encoder(x)
-        return self.decoder(z), self.predictor(z).squeeze(-1)
-
-    def encode(self, x):
-        return self.encoder(x)
 
 
 # =============================================================
@@ -356,60 +316,8 @@ class ImprovedPCLAE(nn.Module):
 # =============================================================
 # AE trainers
 # =============================================================
-def train_standard_ae(X, latent_dim, epochs=100, batch_size=128, lr=1e-3):
-    X_tensor = torch.FloatTensor(X)
-    model = StandardAE(X.shape[1], latent_dim)
-    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    crit = nn.MSELoss()
-    loader = DataLoader(TensorDataset(X_tensor), batch_size=batch_size, shuffle=True)
-    model.train()
-    for _ in range(epochs):
-        for batch in loader:
-            opt.zero_grad()
-            loss = crit(model(batch[0]), batch[0])
-            loss.backward()
-            opt.step()
-    model.eval()
-    with torch.no_grad():
-        return model.encode(X_tensor).numpy()
 
 
-def train_pcl_ae(X, y, latent_dim, epochs=150, batch_size=128, lr=1e-3,
-                 lambda_prop=None, pos_weight=10.0):
-    """Train Property Co-learning AE (PCL-AE).
-
-    If ``lambda_prop`` is None, reads from config.py:BEST_LAMBDA_PROP.
-
-    Note: This is the original implementation. Consider using train_pcl_ae_improved()
-    for better latent space structure and robustness to outliers.
-    """
-    if lambda_prop is None:
-        lambda_prop = float(BEST_LAMBDA_PROP)
-    X_tensor = torch.FloatTensor(X)
-    y_tensor = torch.FloatTensor(y).unsqueeze(1)
-    model = PropertyCoLearningAE(X.shape[1], latent_dim)
-    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=10, factor=0.5)
-    bce = nn.BCEWithLogitsLoss(reduction='none')
-    mse = nn.MSELoss()
-    loader = DataLoader(TensorDataset(X_tensor, y_tensor), batch_size=batch_size, shuffle=True)
-    y_mean, y_std_ = y.mean(), y.std() + 1e-6
-    for _ in range(epochs):
-        model.train()
-        for xb, yb in loader:
-            opt.zero_grad()
-            z = model.encoder(xb)
-            recon = model.decoder(z)
-            pred = model.predictor(z).squeeze(-1)
-            recon_loss = (bce(recon, xb) * (xb * (pos_weight - 1) + 1)).mean()
-            prop_loss = mse(pred * y_std_ + y_mean, yb.squeeze(-1))
-            loss = recon_loss + lambda_prop * prop_loss
-            loss.backward()
-            opt.step()
-        sched.step(recon_loss.item())
-    model.eval()
-    with torch.no_grad():
-        return model.encode(X_tensor).numpy()
 
 
 def train_pcl_ae_improved(X, y, latent_dim, epochs=150, batch_size=128, lr=1e-3,
@@ -522,62 +430,30 @@ train_pcl_ae_v2 = train_pcl_ae_improved
 # =============================================================
 # DualBranchANN
 # =============================================================
-class DualBranchANN(nn.Module):
-    """
-    Conv1d-on-DRFP + MLP-on-XTB dual-branch fusion network.
-
-    Init:   DualBranchANN(drfp_dim, xtb_dim, hidden=128)
-    Forward: y = model(x_drfp, x_xtb)
-    """
-
-    def __init__(self, drfp_dim, xtb_dim, hidden=128):
-        super().__init__()
-        self.conv1 = nn.Conv1d(1, 32, kernel_size=5, stride=2, padding=2)
-        self.conv2 = nn.Conv1d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.pool = nn.AdaptiveMaxPool1d(1)
-        self.bn_drfp = nn.BatchNorm1d(64)
-        self.fc_drfp = nn.Sequential(
-            nn.Linear(64, hidden), nn.LeakyReLU(0.1), nn.Dropout(0.3),
-            nn.Linear(hidden, 64), nn.LeakyReLU(0.1),
-        )
-        self.fc_xtb = nn.Sequential(
-            nn.Linear(xtb_dim, 64), nn.BatchNorm1d(64), nn.LeakyReLU(0.1), nn.Dropout(0.3),
-            nn.Linear(64, 32), nn.LeakyReLU(0.1), nn.Dropout(0.2),
-        )
-        self.fc_out = nn.Sequential(
-            nn.Linear(64 + 32, 64), nn.BatchNorm1d(64), nn.LeakyReLU(0.1),
-            nn.Linear(64, 1),
-        )
-
-    def forward(self, x_drfp, x_xtb):
-        h = x_drfp.unsqueeze(1)
-        h = torch.relu(self.conv1(h))
-        h = torch.relu(self.conv2(h))
-        h = self.pool(h).squeeze(-1)
-        h = self.bn_drfp(h)
-        h = self.fc_drfp(h)
-        h2 = self.fc_xtb(x_xtb)
-        return self.fc_out(torch.cat([h, h2], dim=1)).squeeze(-1)
 
 
 # =============================================================
 # Tree-model factory
 # =============================================================
-def get_tree_model(name):
+def get_tree_model(name, seed=42):
+    """RF / XGB / LGBM.  ``seed`` defaults to 42 for single-pass callers; any loop
+    that *repeats* an evaluation must pass a seed that varies with the repeat
+    (otherwise every repeat is bit-identical and ``r2_std`` is not a spread over
+    independent runs).  ``eval_sklearn_model`` uses ``seed = 1000*rep + fold_id``."""
     if name == 'RF':
         return RandomForestRegressor(
             n_estimators=200, max_depth=20, min_samples_leaf=2,
-            n_jobs=-1, random_state=42)
+            n_jobs=-1, random_state=seed)
     if name == 'XGB':
         return xgb.XGBRegressor(
             n_estimators=500, max_depth=8, learning_rate=0.05,
             subsample=0.8, colsample_bytree=0.8,
-            tree_method='hist', random_state=42, verbosity=0)
+            tree_method='hist', random_state=seed, verbosity=0)
     if name == 'LGBM':
         return lgb.LGBMRegressor(
             n_estimators=500, num_leaves=63, learning_rate=0.05,
             subsample=0.8, colsample_bytree=0.8, min_data_in_leaf=10,
-            device='cpu', verbose=-1, random_state=42)
+            device='cpu', verbose=-1, random_state=seed)
     raise ValueError(name)
 
 
@@ -585,7 +461,14 @@ def get_tree_model(name):
 # Cross-validated evaluators
 # =============================================================
 def eval_sklearn_model(model_name, X, y, n_folds=5, n_repeats=3):
-    """5-fold CV using the canonical data_split.json manifest (seed=2026, yield-stratified)."""
+    """5-fold CV on the canonical data_split.json manifest (seed=2026, yield-stratified).
+
+    NOTE on ``n_repeats``: the manifest folds are FIXED, so a repeat only re-seeds
+    the model (``seed = 1000*rep + fold_id``).  ``r2_std`` is therefore the SD over
+    fold x model-seed evaluations (descriptive); it is NOT an SE of the mean and the
+    ``n_repeats*n_folds`` evaluations are not independent (training sets overlap).
+    Before this fix the tree seed was constant, so repeats were identical copies.
+    """
     fold_records = []
     n = len(y)
     folds = kfold_folds(load_manifest())
@@ -594,7 +477,7 @@ def eval_sklearn_model(model_name, X, y, n_folds=5, n_repeats=3):
             scaler = StandardScaler()
             X_tr = scaler.fit_transform(X[tr])
             X_te = scaler.transform(X[te])
-            model = get_tree_model(model_name)
+            model = get_tree_model(model_name, seed=1000 * rep + int(fold_id))
             model.fit(X_tr, y[tr])
             pred = np.clip(model.predict(X_te), 0, 1)
             r2 = r2_score(y[te], pred)
@@ -619,7 +502,15 @@ def eval_sklearn_model(model_name, X, y, n_folds=5, n_repeats=3):
 
 
 def eval_dual_branch(X_drfp, X_other, y, n_folds=5, n_repeats=2, hidden=128):
-    """DualBranchANN 5-fold CV using data_split.json manifest."""
+    """DualBranchANN 5-fold CV using data_split.json manifest.
+
+    Early stopping / LR scheduling use a validation split carved out of the
+    TRAINING fold only (``eval_protocol.models.DualBranchRegressor``); the test
+    fold is never consulted, and the reported R2 is that of the prediction at
+    the best *validation* epoch (previously: max-over-epochs test R2, which is
+    an optimistically biased selection).  Each repeat uses a different seed.
+    """
+    from eval_protocol.models import DualBranchRegressor
     fold_records = []
     folds = kfold_folds(load_manifest())
     for rep in range(n_repeats):
@@ -629,51 +520,20 @@ def eval_dual_branch(X_drfp, X_other, y, n_folds=5, n_repeats=2, hidden=128):
             Xd_te = sd.transform(X_drfp[te])
             Xo_tr = so.fit_transform(X_other[tr])
             Xo_te = so.transform(X_other[te])
-
-            Xd_tr_t = torch.tensor(Xd_tr, dtype=torch.float32).to(DEVICE)
-            Xd_te_t = torch.tensor(Xd_te, dtype=torch.float32).to(DEVICE)
-            Xo_tr_t = torch.tensor(Xo_tr, dtype=torch.float32).to(DEVICE)
-            Xo_te_t = torch.tensor(Xo_te, dtype=torch.float32).to(DEVICE)
-            y_tr_t = torch.tensor(y[tr], dtype=torch.float32).to(DEVICE)
-
-            model = DualBranchANN(X_drfp.shape[1], X_other.shape[1], hidden=hidden).to(DEVICE)
-            opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-            sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=15, factor=0.5)
-            ds = TensorDataset(Xd_tr_t, Xo_tr_t, y_tr_t)
-            dl = DataLoader(ds, batch_size=64, shuffle=True)
-
-            best_r2 = -np.inf
-            best_pred = None
-            no_imp = 0
-            for ep in range(300):
-                model.train()
-                for xd, xo, yy in dl:
-                    opt.zero_grad()
-                    loss = nn.MSELoss()(model(xd, xo), yy)
-                    loss.backward()
-                    opt.step()
-                model.eval()
-                with torch.no_grad():
-                    pred = model(Xd_te_t, Xo_te_t).cpu().numpy()
-                r2 = r2_score(y[te], pred)
-                sched.step(1 - r2)
-                if r2 > best_r2:
-                    best_r2 = r2
-                    best_pred = pred
-                    no_imp = 0
-                else:
-                    no_imp += 1
-                if no_imp >= 40:
-                    break
-            best_pred = np.clip(best_pred, 0, 1)
-            mae = mean_absolute_error(y[te], best_pred)
-            rmse = float(np.sqrt(mean_squared_error(y[te], best_pred)))
+            reg = DualBranchRegressor(
+                n_first=X_drfp.shape[1], hidden=hidden,
+                random_state=1000 * rep + fold_id, device=str(DEVICE))
+            reg.fit(np.hstack([Xd_tr, Xo_tr]).astype(np.float32), y[tr])
+            pred = np.clip(reg.predict(np.hstack([Xd_te, Xo_te]).astype(np.float32)), 0, 1)
+            r2 = r2_score(y[te], pred)
+            mae = mean_absolute_error(y[te], pred)
+            rmse = float(np.sqrt(mean_squared_error(y[te], pred)))
             try:
-                pr = float(pearsonr(y[te], best_pred)[0])
+                pr = float(pearsonr(y[te], pred)[0])
             except Exception:
                 pr = np.nan
             fold_records.append({
-                'rep': rep, 'fold': fold_id, 'r2': float(best_r2),
+                'rep': rep, 'fold': fold_id, 'r2': float(r2),
                 'mae': float(mae), 'rmse': float(rmse), 'pearson': float(pr),
             })
     fm = pd.DataFrame(fold_records)

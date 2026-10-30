@@ -9,13 +9,15 @@ TIER 1 final step (one-shot merge).
 
 Inputs
 ------
-data/processed/co2_drfp_xtb_extended.csv          (master CSV after Tier 1 batch)
-results/results_cho_diagnostic/xtb_results_summary.csv   (from 104b)
+data/processed/co2_drfp.csv                       (output of 103_drfp.py)
+results/results_cho_diagnostic/xtb_results_summary.csv   (from 104c; copy or
+                                                          point --xtb-summary at it)
 
 Outputs
 -------
 results/results_cho_diagnostic/co2_drfp_xtb_extended.csv     (NOT the input path;
-                                                              no in-place overwrite)
+                                                              no in-place overwrite;
+                                                              row count equals co2_drfp.csv)
 data/external/substrate_xtb_baseline.json                    (regenerated each run)
 
 History
@@ -38,7 +40,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition")
+PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 SRC_DIR = os.path.join(PROJECT_ROOT, "src")
@@ -69,7 +71,7 @@ except Exception:
     Chem = None  # type: ignore
 
 from src.paths import (
-    DRFP_XTB_EXTENDED_CSV,
+    DRFP_CSV,
     RESULTS_CHO_DIAGNOSTIC,
     SUBSTRATE_XTB_BASELINE,
     ensure_dir,
@@ -146,7 +148,9 @@ SUBSTRATE_XTB_REF = {
     "styrene_oxide":          {"homo": -10.93, "lumo": -6.29, "gap": 4.64, "dipole": 2.46},
     "propylene_oxide":        {"homo": -11.33, "lumo": -2.85, "gap": 8.48, "dipole": 2.53},
     "epichlorohydrin":        {"homo": -11.49, "lumo": -4.75, "gap": 6.74, "dipole": 0.46},
-    "cyclohexene_oxide":      {"homo": -10.56, "lumo": -1.87, "gap": 8.69, "dipole": 2.02},
+    # 2026-10: recomputed for the correct 7-oxabicyclo[4.1.0]heptane (the earlier
+    # -10.56/-1.87 values belonged to bicyclo[3.1.0]hexan-6-ol, a different molecule).
+    "cyclohexene_oxide":      {"homo": -10.279, "lumo": -4.008, "gap": 6.271, "dipole": 2.956},
     "isopropyl_glycidyl_ether": {"homo": -10.88, "lumo": -3.23, "gap": 7.65, "dipole": 2.30},
 }
 
@@ -158,80 +162,36 @@ SUBSTRATE_XTB_REF = {
 # xtb_results_summary.csv table produced by 104b.)
 # ----------------------------------------------------------------------------
 def build_catalyst_xtb_lookup(xtb_df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
-    """Return SMILES -> {homo, lumo, gap, dipole, charge} for every catalyst.
+    """Return canonical-SMILES -> {homo, lumo, gap, dipole, charge}.
 
-    The xtb_results_summary.csv has one row per molecule (including salts
-    stored as neutral salt pairs like "CCCC[N+](CCCC)(CCCC)CCCC.[I-]"). For
-    IL catalysts (which 102 produces as "cation.anion" with a literal "."),
-    we also split the salt into its ionic components when possible and index
-    each component by its own canonical SMILES, so lookups by either the
-    salt SMILES or the cation/anion SMILES resolve.
-
-    The returned dict maps canonical SMILES -> xTB dict.
+    Each xtb_results_summary.csv row is indexed under ITS OWN canonical SMILES
+    only.  (Before 2026-10 the fragments of every multi-component salt row were
+    also indexed, which overwrote the single-ion rows with the salt's whole-
+    molecule values: e.g. TBA+ got the HOMO of TBA2ZnBr4.)  Rows that failed QC
+    (xtb_ok False) are skipped, so unreliable species resolve to NaN.
     """
     out: Dict[str, Dict[str, float]] = {}
-
-    def _row_to_xtb(row) -> Optional[Dict[str, float]]:
-        try:
-            homo_v = float(row["homo_eV"]) if pd.notna(row.get("homo_eV")) else None
-            lumo_v = float(row["lumo_eV"]) if pd.notna(row.get("lumo_eV")) else None
-            gap_v  = float(row["gap_eV"])  if pd.notna(row.get("gap_eV"))  else None
-            mu_v   = float(row["dipole_D"]) if pd.notna(row.get("dipole_D")) else None
-            chg_v  = int(row["charge"]) if pd.notna(row.get("charge")) else 0
-        except Exception:
-            return None
-        if homo_v is None or lumo_v is None or gap_v is None:
-            return None
-        return {
-            "homo": homo_v,
-            "lumo": lumo_v,
-            "gap":  gap_v,
-            "dipole": mu_v if mu_v is not None else 0.0,
-            "charge": chg_v,
-        }
-
     for _, row in xtb_df.iterrows():
+        if "xtb_ok" in xtb_df.columns and not bool(row.get("xtb_ok")):
+            continue
         smi = row.get("smiles")
         if not isinstance(smi, str) or not smi.strip():
             continue
-        data = _row_to_xtb(row)
-        if data is None:
+        if pd.isna(row.get("homo_eV")) or pd.isna(row.get("lumo_eV")) or pd.isna(row.get("gap_eV")):
             continue
-        # Index by raw SMILES (canonicalised whitespace)
+        data = {
+            "homo": float(row["homo_eV"]),
+            "lumo": float(row["lumo_eV"]),
+            "gap": float(row["gap_eV"]),
+            "dipole": float(row["dipole_D"]) if pd.notna(row.get("dipole_D")) else 0.0,
+            "charge": int(row["charge"]) if pd.notna(row.get("charge")) else 0,
+        }
         key = smi.strip()
-        # RDKit canonical SMILES (if RDKit available) for robust matching
         if RDKIT_AVAILABLE:
-            try:
-                mol = Chem.MolFromSmiles(key)
-                if mol is not None:
-                    can = Chem.MolToSmiles(mol)
-                    out[can] = data
-                    out[key] = data
-                else:
-                    out[key] = data
-            except Exception:
-                out[key] = data
-        else:
-            out[key] = data
-
-        # If the SMILES is a salt (".", between cation and anion), also index
-        # the individual fragments so 102's "CCCC[N+](CCCC)(CCCC)CCCC.[I-]"
-        # style salt SMILES AND its components ("CCCC[N+](CCCC)(CCCC)CCCC",
-        # "[I-]") both resolve.
-        if "." in key and RDKIT_AVAILABLE:
-            try:
-                mol = Chem.MolFromSmiles(key)
-                if mol is not None and "." in Chem.MolToSmiles(mol):
-                    frags = Chem.GetMolFrags(mol, asMols=True)
-                    for fmol in frags:
-                        fcan = Chem.MolToSmiles(fmol)
-                        fcharge = Chem.GetFormalCharge(fmol)
-                        fdata = dict(data)
-                        fdata["charge"] = int(fcharge)
-                        out[fcan] = fdata
-            except Exception:
-                pass
-
+            mol = Chem.MolFromSmiles(key)
+            if mol is not None:
+                key = Chem.MolToSmiles(mol)
+        out[key] = data
     return out
 
 
@@ -277,23 +237,21 @@ def compute_cat_xtb_row(
     cat_smiles: Optional[str],
     lookup: Dict[str, Dict[str, float]],
 ) -> Dict[str, float]:
-    """Compute cat_cation_*, cat_anion_*, and match-type columns for a row.
+    """cat_cation_* / cat_anion_* descriptors for one catalyst SMILES.
 
-    Returns a dict of values to write back into the master DataFrame. Any
-    component that cannot be resolved is set to NaN.
+    salt   : split into fragments; the cation (charge>0) and anion (charge<0)
+             are looked up individually.  A bare metal ion has no orbitals in
+             GFN2, so when the cation fragment has no record the whole neutral
+             salt (e.g. ZnBr2) is used as the cation-side proxy and labelled
+             'salt_whole_proxy'.
+    single : the molecule itself is used on the cation side ('single_lookup').
+    Anything unresolved stays NaN.
     """
     out: Dict[str, float] = {
-        "cat_cation_homo_eV": np.nan,
-        "cat_cation_lumo_eV": np.nan,
-        "cat_cation_gap_eV":  np.nan,
-        "cat_anion_homo_eV":  np.nan,
-        "cat_anion_lumo_eV":  np.nan,
-        "cat_anion_gap_eV":   np.nan,
-        "cat_cation_dipole_D": np.nan,
-        "cat_anion_dipole_D":  np.nan,
-        "cation_match_type": "",
-        "anion_match_type": "",
-        "catalyst_type_v2": "",
+        "cat_cation_homo_eV": np.nan, "cat_cation_lumo_eV": np.nan, "cat_cation_gap_eV": np.nan,
+        "cat_anion_homo_eV": np.nan, "cat_anion_lumo_eV": np.nan, "cat_anion_gap_eV": np.nan,
+        "cat_cation_dipole_D": np.nan, "cat_anion_dipole_D": np.nan,
+        "cation_match_type": "", "anion_match_type": "", "catalyst_type_v2": "",
     }
     if not isinstance(cat_smiles, str) or not cat_smiles.strip():
         return out
@@ -301,76 +259,44 @@ def compute_cat_xtb_row(
     kind = _classify_catalyst(cat_smiles)
     out["catalyst_type_v2"] = kind
 
-    if kind == "salt":
-        # Split salt into cation (charge > 0) and anion (charge < 0).
-        cat_lookup = _lookup_smiles(cat_smiles, lookup)
-        cation_v = anion_v = None
-        # Walk fragments using RDKit
-        if RDKIT_AVAILABLE:
-            try:
-                mol = Chem.MolFromSmiles(cat_smiles.strip())
-                if mol is not None:
-                    frags = Chem.GetMolFrags(mol, asMols=True)
-                    cation_frag = anion_frag = None
-                    for f in frags:
-                            chg = Chem.GetFormalCharge(f)
-                            if chg > 0 and cation_frag is None:
-                                cation_frag = f
-                            elif chg < 0 and anion_frag is None:
-                                anion_frag = f
-                    if cation_frag is not None:
-                        cation_v = lookup.get(Chem.MolToSmiles(cation_frag))
-                    if anion_frag is not None:
-                        anion_v = lookup.get(Chem.MolToSmiles(anion_frag))
-            except Exception:
-                pass
-        # Fallback: try the salt as a whole (some xtb rows were computed on
-        # the neutral ion-pair).
-        if cation_v is None and cat_lookup is not None and cat_lookup.get("charge", 0) > 0:
-            cation_v = cat_lookup
-        if anion_v is None and cat_lookup is not None and cat_lookup.get("charge", 0) < 0:
-            anion_v = cat_lookup
-        # Last resort: try lookup by raw token-split on "."
-        if cation_v is None or anion_v is None:
-            for tok in cat_smiles.split("."):
-                tok = tok.strip()
-                if not tok:
-                    continue
-                rec = _lookup_smiles(tok, lookup)
-                if rec is None:
-                    continue
-                chg = rec.get("charge", 0)
-                if chg > 0 and cation_v is None:
-                    cation_v = rec
-                elif chg < 0 and anion_v is None:
-                    anion_v = rec
-                elif chg == 0 and cation_v is None:
-                    cation_v = rec  # neutral salt (rare): use as cation proxy
+    def _put(prefix: str, rec: Dict[str, float], label: str) -> None:
+        out[f"cat_{prefix}_homo_eV"] = rec["homo"]
+        out[f"cat_{prefix}_lumo_eV"] = rec["lumo"]
+        out[f"cat_{prefix}_gap_eV"] = rec["gap"]
+        out[f"cat_{prefix}_dipole_D"] = rec.get("dipole", 0.0)
+        out[f"{prefix}_match_type"] = label
 
-        if cation_v is not None:
-            out["cat_cation_homo_eV"]   = cation_v["homo"]
-            out["cat_cation_lumo_eV"]   = cation_v["lumo"]
-            out["cat_cation_gap_eV"]    = cation_v["gap"]
-            out["cat_cation_dipole_D"]  = cation_v.get("dipole", 0.0)
-            out["cation_match_type"]    = "salt_split"
+    if kind == "salt":
+        mol = Chem.MolFromSmiles(cat_smiles.strip()) if RDKIT_AVAILABLE else None
+        if mol is None:
+            return out
+        cation_v = anion_v = None
+        cation_is_bare_metal = False
+        for f in Chem.GetMolFrags(mol, asMols=True):
+            chg = Chem.GetFormalCharge(f)
+            rec = lookup.get(Chem.MolToSmiles(f))
+            if chg > 0 and cation_v is None and not cation_is_bare_metal:
+                if rec is not None:
+                    cation_v = rec
+                elif f.GetNumAtoms() == 1:
+                    cation_is_bare_metal = True
+            elif chg < 0 and anion_v is None and rec is not None:
+                anion_v = rec
+        if cation_v is None and cation_is_bare_metal:
+            whole = _lookup_smiles(cat_smiles, lookup)
+            if whole is not None:
+                _put("cation", whole, "salt_whole_proxy")
+        elif cation_v is not None:
+            _put("cation", cation_v, "salt_split")
         if anion_v is not None:
-            out["cat_anion_homo_eV"]    = anion_v["homo"]
-            out["cat_anion_lumo_eV"]    = anion_v["lumo"]
-            out["cat_anion_gap_eV"]     = anion_v["gap"]
-            out["cat_anion_dipole_D"]   = anion_v.get("dipole", 0.0)
-            out["anion_match_type"]     = "salt_split"
+            _put("anion", anion_v, "salt_split")
         return out
 
-    # single (neutral) catalyst: pick the first non-empty of catalyst_1..4
-    # SMILES that resolves. Try 1..4 in main loop.
     rec = _lookup_smiles(cat_smiles, lookup)
     if rec is not None:
-        out["cat_cation_homo_eV"]   = rec["homo"]
-        out["cat_cation_lumo_eV"]   = rec["lumo"]
-        out["cat_cation_gap_eV"]    = rec["gap"]
-        out["cat_cation_dipole_D"]  = rec.get("dipole", 0.0)
-        out["cation_match_type"]    = "single_lookup"
+        _put("cation", rec, "single_lookup")
     return out
+
 
 def build_co2_lookup(xtb_df: pd.DataFrame) -> dict | None:
     """
@@ -434,23 +360,34 @@ def build_substrate_lookup(xtb_df: pd.DataFrame) -> dict:
 
 
 def build_solvent_lookup(xtb_df: pd.DataFrame) -> dict:
-    """Build {solvent_name: {homo, lumo, gap, dipole}}."""
-    sol = xtb_df[xtb_df["role"] == "solvent"].copy()
+    """Build {canonical SMILES: {homo, lumo, gap, dipole}} for solvents.
+
+    Keyed by structure, not by display name, so the lookup cannot be steered by
+    name aliases (2026-10: removed the 'ionic liquid' -> DMSO alias and the
+    substring fallback).  QC-failed rows (xtb_ok False) are skipped.
+    """
+    sol = xtb_df[xtb_df["role"] == "solvent"]
     lookups = {}
     for _, row in sol.iterrows():
-        name = str(row.get("name", "")).strip()
-        gap = row.get("gap_eV")
-        mu  = row.get("dipole_D")
-        homo = row.get("homo_eV")
-        lumo = row.get("lumo_eV")
-        if pd.notna(gap):
-            lookups[name] = {
-                "homo": float(homo) if pd.notna(homo) else np.nan,
-                "lumo": float(lumo) if pd.notna(lumo) else np.nan,
-                "gap": float(gap),
-                "dipole": float(mu) if pd.notna(mu) else 0.0,
-            }
+        if "xtb_ok" in xtb_df.columns and not bool(row.get("xtb_ok")):
+            continue
+        if pd.isna(row.get("homo_eV")) or pd.isna(row.get("lumo_eV")) or pd.isna(row.get("gap_eV")):
+            continue
+        key = str(row["smiles"]).strip()
+        if RDKIT_AVAILABLE:
+            mol = Chem.MolFromSmiles(key)
+            if mol is not None:
+                key = Chem.MolToSmiles(mol)
+        lookups[key] = {
+            "homo": float(row["homo_eV"]),
+            "lumo": float(row["lumo_eV"]),
+            "gap": float(row["gap_eV"]),
+            "dipole": float(row["dipole_D"]) if pd.notna(row.get("dipole_D")) else 0.0,
+        }
     return lookups
+
+
+_WARNED_REF_FALLBACK: set = set()
 
 
 def infer_substrate_xtb(substrate_xtb_name: str, substrate_lookup: dict,
@@ -462,8 +399,13 @@ def infer_substrate_xtb(substrate_xtb_name: str, substrate_lookup: dict,
     # 1. Direct match
     if substrate_xtb_name in substrate_lookup:
         return substrate_lookup[substrate_xtb_name]
-    # 2. Reference values
+    # 2. Reference values (hard-coded; loud, once per substrate, because it means
+    #    104c produced no usable row for this substrate)
     if substrate_xtb_name in substrate_ref:
+        if substrate_xtb_name not in _WARNED_REF_FALLBACK:
+            _WARNED_REF_FALLBACK.add(substrate_xtb_name)
+            logger.warning("substrate %r not in xtb summary; using hard-coded "
+                           "SUBSTRATE_XTB_REF values", substrate_xtb_name)
         d = substrate_ref[substrate_xtb_name]
         return {"homo": d["homo"], "lumo": d["lumo"], "gap": d["gap"], "dipole": d["dipole"]}
     # 3. glycidyl phenyl ether → styrene oxide (analogous)
@@ -606,10 +548,10 @@ def compute_derived_features(row, sub_data: dict, co2_data: dict,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--data", default=str(DRFP_XTB_EXTENDED_CSV),
-                        help="Input CSV (master table from Tier 1).")
+    parser.add_argument("--data", default=str(DRFP_CSV),
+                        help="Input CSV (co2_drfp.csv from 103_drfp.py).")
     parser.add_argument("--xtb-summary", default=str(XTB_SUMMARY_CSV),
-                        help="xTB summary CSV (from 104b).")
+                        help="xTB summary CSV (xtb_results_summary.csv from 104c).")
     parser.add_argument("--out", default=str(MERGED_OUTPUT_CSV),
                         help="Output CSV with merged features. "
                              "By default this is a sibling path under "
@@ -618,7 +560,9 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="Report coverage without writing file")
     parser.add_argument("--force", action="store_true",
-                        help="Re-merge and overwrite output even if it already exists.")
+                        help="Accepted for pipeline-wide --force compatibility. "
+                             "No-op: this script always rebuilds and overwrites "
+                             "its output.")
     parser.add_argument("--verbose", action="store_true",
                         help="Enable DEBUG-level logging.")
     args = parser.parse_args()
@@ -748,36 +692,23 @@ def main() -> int:
         df.at[idx, "co2_lumo_eV"] = co2_data["lumo"]
         df.at[idx, "co2_gap_eV"]  = co2_data["gap"]
 
-        # Solvent xTB (from primary solvent, with flexible matching)
-        solv_name_raw = str(row.get("solvent_1", "")).strip()
+        # Solvent xTB: primary solvent, exact canonical-SMILES lookup
+        # (solvent_1_smiles comes from chem_registry; blank for solvent-free /
+        # unresolved entries such as 'ionic liquid (IL)' -> descriptors stay NaN)
         sv = None
-        if solv_name_raw and solv_name_raw not in ("", "nan", "无溶剂"):
-            # Try: 1) exact dataset name in xtb lookup
-            #      2) SOLVENT_NAME_MAP normalized name in xtb lookup
-            #      3) xTB name directly in xtb lookup
-            if solv_name_raw in solv_lookup:
-                sv = solv_lookup[solv_name_raw]
-            elif solv_name_raw in SOLVENT_NAME_MAP:
-                mapped = SOLVENT_NAME_MAP[solv_name_raw]
-                if mapped in solv_lookup:
-                    sv = solv_lookup[mapped]
-            else:
-                # Try case-insensitive partial match
-                for xtb_name, sv_data in solv_lookup.items():
-                    if xtb_name.lower() == solv_name_raw.lower():
-                        sv = sv_data
-                        break
-                if sv is None:
-                    for xtb_name in solv_lookup:
-                        if xtb_name.lower() in solv_name_raw.lower() or \
-                           solv_name_raw.lower() in xtb_name.lower():
-                            sv = solv_lookup[xtb_name]
-                            break
-            if sv is not None:
-                df.at[idx, "solv_gap_eV"]    = sv["gap"]
-                df.at[idx, "solv_dipole_D"] = sv["dipole"]
-                df.at[idx, "solv_homo_eV"]  = sv["homo"]
-                df.at[idx, "solv_lumo_eV"]  = sv["lumo"]
+        ssmi = row.get("solvent_1_smiles")
+        if isinstance(ssmi, str) and ssmi.strip():
+            key = ssmi.strip()
+            if RDKIT_AVAILABLE:
+                mol = Chem.MolFromSmiles(key)
+                if mol is not None:
+                    key = Chem.MolToSmiles(mol)
+            sv = solv_lookup.get(key)
+        if sv is not None:
+            df.at[idx, "solv_gap_eV"]   = sv["gap"]
+            df.at[idx, "solv_dipole_D"] = sv["dipole"]
+            df.at[idx, "solv_homo_eV"]  = sv["homo"]
+            df.at[idx, "solv_lumo_eV"]  = sv["lumo"]
 
         # New col: co2_homo_eV (was missing — XTB_COLS expects it)
         df.at[idx, "co2_homo_eV"] = co2_data["homo"]

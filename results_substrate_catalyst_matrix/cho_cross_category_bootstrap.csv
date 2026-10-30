@@ -1,0 +1,2 @@
+substrate,statistic,n_total,n_categories,mean_yield_pct,ci95_low,ci95_high,bootstrap_std,n_bootstrap,seed,source_csv
+Cyclohexene oxide,size_weighted_row_bootstrap,128,5,54.529999999999994,49.347404296875,59.67719921875,2.6315216915543105,10000,20261022,results/results_cho_diagnostic/co2_drfp_xtb_extended.csv

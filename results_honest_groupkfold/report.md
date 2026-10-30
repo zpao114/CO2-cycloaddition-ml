@@ -1,67 +1,68 @@
 # GroupKFold HONEST ablation — report
 
-Generated: 2026-09-01 15:01:57
-Per-fold AE training epochs: 80
+Generated: 2026-10-29 22:11:51
+Per-fold AE training epochs: 150
 Seeds: [42, 2024, 7, 9998, 7777]
 Catalyst group column: `catalyst_system_type` (5 categories)
 Split protocol: `GroupKFold(n_splits=5)` with `groups = f"{c}_{seed}"` (byte-for-byte replica of `generate_si_s3_benchmark_full_v3_1.py` §5)
 
 ## 1. Why this experiment
 
-The paper's §3.1 GroupKFold R² = +0.388 (XGB, F2 PCL-AE) was produced by training the PCL-AE encoder on ALL 2,490 rows once, then reusing the resulting 128-D latent across every GroupKFold fold.  This is the same caching pattern that inflates the LOSO headline by ~+1.07 R² units (see `pcl_ae_fair_comparison.py`).  This script runs the GroupKFold protocol **honestly**: a fresh PCL-AE encoder is trained on the train fold only, for every fold.
+The cached GroupKFold benchmark trains the PCL-AE encoder on ALL rows once, then reuses the resulting 128-D latent across every GroupKFold fold.  This is the same caching pattern whose LOSO effect is measured in `pcl_ae_fair_comparison_multiseed.py` (authoritative Delta_protocol).  This script runs the GroupKFold protocol **honestly**: a fresh PCL-AE encoder is trained on the train fold only, for every fold.  The grouping key is the catalyst system type, so this is a second-split check of the cached-vs-honest gap (catalyst-type holdout, not a cross-substrate claim); the gap need not match the LOSO one.
 
 ## 2. Per-(seed, model) sweep
 
 | seed | model | n_folds | honest_r2_mean | cached_r2_mean | delta_r2_mean |
 |---|---|---|---|---|---|
-| 42 | XGB | 5 | +0.0081 | +0.4562 | -0.4481 |
-| 42 | LGBM | 5 | -0.0156 | +0.4505 | -0.4661 |
-| 42 | RF | 5 | +0.0158 | +0.4948 | -0.4790 |
-| 42 | DualBranchANN | 5 | -0.0367 | +0.4401 | -0.4768 |
-| 2024 | XGB | 5 | -0.0425 | +0.4508 | -0.4933 |
-| 2024 | LGBM | 5 | -0.0542 | +0.4505 | -0.5046 |
-| 2024 | RF | 5 | -0.0152 | +0.4958 | -0.5110 |
-| 2024 | DualBranchANN | 5 | -0.0583 | +0.4353 | -0.4936 |
-| 7 | XGB | 5 | +0.0132 | +0.4469 | -0.4338 |
-| 7 | LGBM | 5 | -0.0123 | +0.4505 | -0.4628 |
-| 7 | RF | 5 | +0.0104 | +0.4959 | -0.4854 |
-| 7 | DualBranchANN | 5 | -0.0372 | +0.4332 | -0.4705 |
-| 9998 | XGB | 5 | -0.0003 | +0.4545 | -0.4548 |
-| 9998 | LGBM | 5 | -0.0023 | +0.4505 | -0.4528 |
-| 9998 | RF | 5 | +0.0151 | +0.4960 | -0.4809 |
-| 9998 | DualBranchANN | 5 | -0.0471 | +0.4318 | -0.4790 |
-| 7777 | XGB | 5 | +0.0166 | +0.4661 | -0.4495 |
-| 7777 | LGBM | 5 | -0.0135 | +0.4505 | -0.4639 |
-| 7777 | RF | 5 | +0.0221 | +0.4936 | -0.4715 |
-| 7777 | DualBranchANN | 5 | -0.0429 | +0.4461 | -0.4890 |
+| 42 | XGB | 5 | +0.2558 | +0.2449 | -0.0109 |
+| 42 | LGBM | 5 | +0.1884 | +0.2881 | +0.0997 |
+| 42 | RF | 5 | +0.3312 | +0.3730 | +0.0418 |
+| 42 | ConcatMLP | 5 | +0.2484 | +0.3154 | +0.0671 |
+| 2024 | XGB | 5 | +0.2770 | +0.2443 | -0.0327 |
+| 2024 | LGBM | 5 | +0.2547 | +0.2881 | +0.0334 |
+| 2024 | RF | 5 | +0.3534 | +0.3713 | +0.0178 |
+| 2024 | ConcatMLP | 5 | +0.2923 | +0.3175 | +0.0252 |
+| 7 | XGB | 5 | +0.2776 | +0.2570 | -0.0206 |
+| 7 | LGBM | 5 | +0.2495 | +0.2881 | +0.0386 |
+| 7 | RF | 5 | +0.3424 | +0.3672 | +0.0249 |
+| 7 | ConcatMLP | 5 | +0.2445 | +0.2827 | +0.0382 |
+| 9998 | XGB | 5 | +0.2656 | +0.2031 | -0.0626 |
+| 9998 | LGBM | 5 | +0.1602 | +0.2881 | +0.1279 |
+| 9998 | RF | 5 | +0.3272 | +0.3672 | +0.0399 |
+| 9998 | ConcatMLP | 5 | +0.0922 | +0.3283 | +0.2361 |
+| 7777 | XGB | 5 | +0.2171 | +0.2332 | +0.0161 |
+| 7777 | LGBM | 5 | +0.1089 | +0.2881 | +0.1792 |
+| 7777 | RF | 5 | +0.2966 | +0.3722 | +0.0756 |
+| 7777 | ConcatMLP | 5 | +0.1034 | +0.3227 | +0.2193 |
 
 ## 3. N-seed mean comparison (headline)
 
 | model | n_seeds | honest_r2_mean | honest_r2_std | cached_r2_mean | cached_r2_std | delta_r2_mean |
 |---|---|---|---|---|---|---|
-| XGB | 5 | -0.0010 ± 0.0241 | +0.4549 ± 0.0072 | -0.4559 |
-| LGBM | 5 | -0.0196 ± 0.0200 | +0.4505 ± 0.0000 | -0.4701 |
-| RF | 5 | +0.0096 ± 0.0145 | +0.4952 ± 0.0010 | -0.4856 |
-| DualBranchANN | 5 | -0.0445 ± 0.0089 | +0.4373 ± 0.0058 | -0.4818 |
+| XGB | 5 | +0.2586 ± 0.0249 | +0.2365 ± 0.0205 | -0.0221 |
+| LGBM | 5 | +0.1923 ± 0.0616 | +0.2881 ± 0.0000 | +0.0958 |
+| RF | 5 | +0.3302 ± 0.0214 | +0.3702 ± 0.0028 | +0.0400 |
+| ConcatMLP | 5 | +0.1961 ± 0.0918 | +0.3133 ± 0.0178 | +0.1172 |
 
 ## 4. Per-fold (catalyst-held-out) diagnostics
 
-| held-out catalysts | n(seed×fold) | honest R² (mean ± std) | cached R² (mean ± std) | Δ R² |
+| held-out catalysts | n(seed×fold) | honest R² (mean ± std) | cached R² (mean ± std) | Δ R² (cached − honest) |
 |---|---|---|---|---|
-| ionic_liquid | 20 | +0.1307 ± 0.0440 | +0.3355 ± 0.0273 | -0.2048 |
-| metal_halide | 20 | +0.3706 ± 0.0301 | +0.6105 ± 0.0299 | -0.2399 |
-| mixed_system | 20 | +0.0277 ± 0.0494 | +0.4688 ± 0.0168 | -0.4412 |
-| organic_base | 20 | -0.4220 ± 0.0554 | +0.2422 ± 0.0639 | -0.6642 |
-| unknown | 20 | -0.1762 ± 0.0378 | +0.6404 ± 0.0130 | -0.8165 |
+| ionic_liquid | 20 | +0.2284 ± 0.0520 | +0.1544 ± 0.1189 | -0.0740 |
+| metal_halide | 20 | +0.3020 ± 0.0480 | +0.3733 ± 0.0275 | +0.0713 |
+| mixed_system | 20 | +0.1958 ± 0.1568 | +0.4052 ± 0.1761 | +0.2094 |
+| organic_base | 20 | +0.3302 ± 0.1607 | +0.3178 ± 0.1240 | -0.0124 |
+| unknown | 20 | +0.1651 ± 0.0850 | +0.2594 ± 0.0595 | +0.0943 |
 
 ## 5. Interpretation
 
-**PAIRED comparison.** Every honest/cached R² in §3 is on the **same fold with the same seed**: the only difference between the two columns is whether the PCL-AE encoder saw all 2,490 rows (cached) or only the train fold (honest).  The Δ column is therefore a per-fold leakage measurement, not a mean-of-means comparison.
+**PAIRED comparison.** Every honest/cached R² in §3 is on the **same fold with the same seed**: the only difference between the two columns is whether the PCL-AE encoder saw all rows (cached) or only the train fold (honest).  The Δ column is therefore a per-fold leakage measurement, not a mean-of-means comparison.
 
-**Note on seed convention.** This script uses seeds = (42, 2024, 7) to align with the LOSO honest script (`pcl_ae_fair_comparison.py`). The cached GroupKFold CSV from §3.1 (`groupkfold_v3_full_results.csv`) uses seeds = (0, 1, 2). The cached 3-seed mean XGB R² therefore differs slightly between this script (+0.4513) and the paper §3.1 (+0.3883); the **paired** leakage Δ is invariant to the seed choice.
+**Note on seed convention.** This script uses seeds = [42, 2024, 7, 9998, 7777], aligned with `pcl_ae_fair_comparison_multiseed.py`.  The cached and honest arms share the same seeds and folds, so the **paired** gap is the quantity to quote.  GroupKFold by catalyst type is deterministic: the 5 folds are identical for every seed, so seeds vary only encoder / regressor initialisation, not the split.
 
-- **XGB headline**: cached R² = +0.4549, honest R² = -0.0010, paired leakage Δ = -0.4559.
-- GroupKFold leakage is **severe**: honest R² (-0.001) collapses to near zero. The §3.1 cached number **cannot be defended** as an honest out-of-fold R²; the framework's diagnostic value (catalyst-stratified transferability, SHAP direction, §3.2 LOSO root-cause) becomes the primary story. The paper should explicitly downgrade §3.1 from 'GroupKFold R² = 0.388' to 'GroupKFold R² ≤ 0.07 (honest)', and frame §3.1 as the *cached latent reference* used to power the SHAP diagnostics, not as an honest generalisation number.
+- **XGB headline**: cached R² = +0.2365, honest R² = +0.2586, paired gap (cached − honest) = -0.0221.
+- **Paired Δ (cached − honest; positive = overestimate, same sign as Δprotocol) per model**: XGB -0.022, LGBM +0.096, RF +0.040, ConcatMLP +0.117.
+- The gap is model-dependent: cached R² exceeds honest R² for 3/4 models and not for the others. Quote the per-model values; do not describe GroupKFold as a uniform replication of the LOSO inflation.
 
 ## 6. Reproducibility
 
@@ -69,5 +70,5 @@ The paper's §3.1 GroupKFold R² = +0.388 (XGB, F2 PCL-AE) was produced by train
 - Cached latent: `results_pcl_ae/pcl_ae_latent.npy`
 - Cached baseline CSV: `results/results_si/groupkfold_v3_full_results.csv`
 - This script: `src/analysis/honest_groupkfold_ablation.py`
-- Per-fold AE: `PropertyCoLearningAE` from `utils_benchmark.py`
-- λ_prop = 200.0, latent_dim = 128
+- Per-fold AE: `PropertyCoLearningAE` from `eval_protocol/nets.py`
+- λ_prop = 0.2, latent_dim = 128

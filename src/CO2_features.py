@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 from functools import lru_cache
 
-PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition")
+PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 sys.path.insert(0, PROJECT_ROOT)
 from CO2_rxn import read_drfp
 

@@ -8,9 +8,9 @@ so that downstream scripts (e.g. 705_virtual_screening.py) can score
 new reactions without re-training.
 
 The property-co-learning weight lambda_prop is exposed as a CLI argument.
-The 2026-08-18 ablation stores the optimal λ in config.py as BEST_LAMBDA_PROP.
-To re-calibrate, run: python 201_ablation.py
-(it will overwrite config.py automatically).
+Its default is config.BEST_LAMBDA_PROP, which config.py reads from
+results_lambda_ablation/lambda_results.csv (written by 201_ablation.py stage 2).
+To re-calibrate, rerun 201_ablation.py stage 2; config.py is not rewritten.
 
 Outputs (all under results_best_pipeline/artifacts/):
   - drfp_scaler.joblib            : StandardScaler fit on raw DRFP (2048 D)
@@ -25,8 +25,8 @@ Outputs (all under results_best_pipeline/artifacts/):
 
 Usage:
   python 401_persist_best_pipeline.py                  # use default lambda from config.py
-  python 401_persist_best_pipeline.py --lambda 0.5     # reproduce unsupervised baseline
-  python 401_persist_best_pipeline.py --lambda 50.0    # reproduce 2026-07-31 plateau optimum
+  python 401_persist_best_pipeline.py --lambda 0.0     # property term off (label-free ablation)
+  python 401_persist_best_pipeline.py --lambda 10.0    # any other point of the 201 stage-2 grid
 """
 
 import os
@@ -58,13 +58,14 @@ from sklearn.model_selection import KFold  # noqa: F401  (kept for legacy; canon
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
-PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition")
+PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")))
 sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'src'))
-from src.data_split import load_manifest, holdout_arrays, kfold_folds
+from eval_protocol.models import fit_predict_dual  # noqa: E402  (inner-val early stopping)
+from src.data_split import load_manifest, holdout_arrays, kfold_folds, select_train_pool
 sys.path.insert(0, PROJECT_ROOT)
 from utils_rxn import read_drfp, get_best_drfp_variant, XTB_COLS
-from utils_features import COND_COLS
+from utils_features import require_cond_cols
 
 DATA_EXTENDED = os.path.join(PROJECT_ROOT, 'results', 'results_cho_diagnostic', 'co2_drfp_xtb_extended.csv')
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "results_best_pipeline")
@@ -73,18 +74,12 @@ os.makedirs(ARTIFACT_DIR, exist_ok=True)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Defaults chosen by 201_ablation.py (Section 3.1.1 of the paper).
-# The λ sweep identifies the optimal λ stored in config.py.
-# To re-calibrate, run: python 201_ablation.py
-# (it will overwrite config.py automatically).
-try:
-    from config import BEST_LAMBDA_PROP, BEST_LATENT_DIM
-    DEFAULT_LAMBDA_PROP = float(BEST_LAMBDA_PROP)
-    LATENT_DIM = int(BEST_LATENT_DIM)
-except Exception:
-    DEFAULT_LAMBDA_PROP = 0.5   # fallback if config.py is missing
-    LATENT_DIM = 128             # matches default in config.py
-EPOCHS_PCL = 150
+# Defaults come from config.py (lambda: results_lambda_ablation/lambda_results.csv,
+# written by 201_ablation.py stage 2).  No fallback: undefined lambda raises.
+from config import BEST_LATENT_DIM, PCL_AE_EPOCHS, require_best_lambda  # noqa: E402
+DEFAULT_LAMBDA_PROP = require_best_lambda()
+LATENT_DIM = int(BEST_LATENT_DIM)
+EPOCHS_PCL = PCL_AE_EPOCHS
 EPOCHS_ANN = 200
 
 
@@ -92,60 +87,20 @@ EPOCHS_ANN = 200
 # Model architectures (mirrored from 08_benchmark.py)
 # ----------------------------------------------------------------------
 
-class PropertyCoLearningAE(nn.Module):
-    def __init__(self, input_dim, latent_dim):
-        super().__init__()
-        self.input_dim = input_dim
-        self.latent_dim = latent_dim
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 512), nn.BatchNorm1d(512), nn.ReLU(), nn.Dropout(0.2),
-            nn.Linear(512, 256), nn.BatchNorm1d(256), nn.ReLU(), nn.Dropout(0.1),
-            nn.Linear(256, latent_dim),
-        )
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 256), nn.ReLU(),
-            nn.Linear(256, 512), nn.BatchNorm1d(512), nn.ReLU(),
-            nn.Linear(512, input_dim), nn.Sigmoid(),
-        )
-        self.predictor = nn.Sequential(
-            nn.Linear(latent_dim, 64), nn.ReLU(), nn.Dropout(0.1),
-            nn.Linear(64, 32), nn.ReLU(),
-            nn.Linear(32, 1),
-        )
-
-    def encode(self, x):
-        return self.encoder(x)
+from eval_protocol.nets import PropertyCoLearningAE, train_pcl_ae_model  # noqa: E402,F401
+from eval_protocol.models import DualBranchANN  # noqa: E402,F401
 
 
-class DualBranchANN(nn.Module):
-    def __init__(self, drfp_dim, xtb_dim, hidden=128):
-        super().__init__()
-        self.conv1 = nn.Conv1d(1, 32, kernel_size=5, stride=2, padding=2)
-        self.conv2 = nn.Conv1d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.pool = nn.AdaptiveMaxPool1d(1)
-        self.bn_drfp = nn.BatchNorm1d(64)
-        self.fc_drfp = nn.Sequential(
-            nn.Linear(64, hidden), nn.LeakyReLU(0.1), nn.Dropout(0.3),
-            nn.Linear(hidden, 64), nn.LeakyReLU(0.1),
-        )
-        self.fc_xtb = nn.Sequential(
-            nn.Linear(xtb_dim, 64), nn.BatchNorm1d(64), nn.LeakyReLU(0.1), nn.Dropout(0.3),
-            nn.Linear(64, 32), nn.LeakyReLU(0.1), nn.Dropout(0.2),
-        )
-        self.fc_out = nn.Sequential(
-            nn.Linear(64 + 32, 64), nn.BatchNorm1d(64), nn.LeakyReLU(0.1),
-            nn.Linear(64, 1),
-        )
+def train_pcl_ae(X, y, latent_dim=LATENT_DIM, epochs=EPOCHS_PCL,
+                 batch_size=128, lr=1e-3, lambda_prop=DEFAULT_LAMBDA_PROP,
+                 pos_weight=10.0):
+    """Train PCL-AE on standardized DRFP (thin wrapper over eval_protocol.nets)."""
+    print(f"[2/4] Training PCL-AE (lambda={lambda_prop}, latent_dim={latent_dim}, epochs={epochs}) ...")
+    return train_pcl_ae_model(X, y, latent_dim, lambda_prop, epochs, batch_size, lr,
+                              pos_weight, device=DEVICE)
 
-    def forward(self, x_drfp, x_xtb):
-        h = x_drfp.unsqueeze(1)
-        h = torch.relu(self.conv1(h))
-        h = torch.relu(self.conv2(h))
-        h = self.pool(h).squeeze(-1)
-        h = self.bn_drfp(h)
-        h = self.fc_drfp(h)
-        h2 = self.fc_xtb(x_xtb)
-        return self.fc_out(torch.cat([h, h2], dim=1)).squeeze(-1)
+
+
 
 
 # ----------------------------------------------------------------------
@@ -183,9 +138,8 @@ def load_data(use_holdout_train=True):
     df = df[df["yield (%)"] > 0].reset_index(drop=True)
 
     if use_holdout_train:
-        train_idx, _, _ = holdout_arrays(load_manifest())
-        df = df.iloc[sorted(train_idx)].reset_index(drop=True)
-        print(f"  [load_data] filtered to holdout train pool: {len(df)} rows")
+        df = select_train_pool(df, load_manifest())   # verifies row_id order + data hash
+        print(f"  [load_data] filtered to holdout train pool: {len(df)} rows (manifest verified)")
 
     print(f"  Valid samples: {len(df)}")
 
@@ -196,10 +150,11 @@ def load_data(use_holdout_train=True):
     X_xtb = np.nan_to_num(df[xtb_cols].values.astype(np.float32), nan=0.0)
     print(f"  XTB: {X_xtb.shape[1]}D ({len(xtb_cols)} cols)")
 
-    cat_loading_cols = [c for c in df.columns if "loading_mol%" in c]
-    cond_cols = [c for c in COND_COLS + cat_loading_cols if c in df.columns]
+    # Real column names in fixed order: temperature, pressure, time, loadings.
+    # require_cond_cols raises if T/P/t is missing instead of silently shrinking Cond.
+    cond_cols = require_cond_cols(df, include_loading=True)
     X_cond = np.nan_to_num(df[cond_cols].values.astype(np.float32), nan=0.0)
-    print(f"  Cond: {X_cond.shape[1]}D")
+    print(f"  Cond: {X_cond.shape[1]}D ({cond_cols})")
 
     T = X_cond[:, 0:1]
     P = X_cond[:, 1:2]
@@ -222,35 +177,6 @@ def load_data(use_holdout_train=True):
 # Training
 # ----------------------------------------------------------------------
 
-def train_pcl_ae(X, y, latent_dim=LATENT_DIM, epochs=EPOCHS_PCL,
-                 batch_size=128, lr=1e-3, lambda_prop=DEFAULT_LAMBDA_PROP,
-                 pos_weight=10.0):
-    """Train PCL-AE on standardized DRFP with reconstruction + yield-supervised loss."""
-    print(f"[2/4] Training PCL-AE (lambda={lambda_prop}, latent_dim={latent_dim}, epochs={epochs}) ...")
-    X_tensor = torch.FloatTensor(X).to(DEVICE)
-    y_tensor = torch.FloatTensor(y).unsqueeze(1).to(DEVICE)
-    model = PropertyCoLearningAE(X.shape[1], latent_dim).to(DEVICE)
-    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=10, factor=0.5)
-    bce = nn.BCEWithLogitsLoss(reduction="none")
-    mse = nn.MSELoss()
-    loader = DataLoader(TensorDataset(X_tensor, y_tensor), batch_size=batch_size, shuffle=True)
-    y_mean, y_std_ = float(y.mean()), float(y.std() + 1e-6)
-    for ep in range(epochs):
-        model.train()
-        for xb, yb in loader:
-            opt.zero_grad()
-            z = model.encoder(xb)
-            recon = model.decoder(z)
-            pred = model.predictor(z).squeeze(-1)
-            recon_loss = (bce(recon, xb) * (xb * (pos_weight - 1) + 1)).mean()
-            prop_loss = mse(pred * y_std_ + y_mean, yb.squeeze(-1))
-            loss = recon_loss + lambda_prop * prop_loss
-            loss.backward()
-            opt.step()
-        sched.step(recon_loss.item())
-    model.eval()
-    return model
 
 
 def train_dual_branch(Xd, Xo, y, hidden=128, epochs=EPOCHS_ANN,
@@ -313,6 +239,12 @@ def train_dual_branch(Xd, Xo, y, hidden=128, epochs=EPOCHS_ANN,
     return model
 
 
+PERSIST_PROTOCOL = "pretrain_frozen"
+PERSIST_PROTOCOL_NOTE = (
+    "Encoder (scaler + PCL-AE) was fitted once on the whole pool and reused across folds; these CV numbers therefore carry the pretrain-frozen protocol inflation and are a sanity check of the exported artifact only. Honest performance: retrain-per-fold (eval_protocol)."
+)
+
+
 def eval_dual_branch_5fold(X_drfp, X_other, y, n_folds=5, hidden=128):
     """5-fold CV with early stopping (R^2-based) using data_split.json manifest."""
     print(f"[3/4] 5-fold CV sanity (DualBranchANN on PCL-AE features) ...")
@@ -325,37 +257,11 @@ def eval_dual_branch_5fold(X_drfp, X_other, y, n_folds=5, hidden=128):
         Xo_tr = so.fit_transform(X_other[tr])
         Xo_te = so.transform(X_other[te])
 
-        Xd_tr_t = torch.tensor(Xd_tr, dtype=torch.float32).to(DEVICE)
-        Xd_te_t = torch.tensor(Xd_te, dtype=torch.float32).to(DEVICE)
-        Xo_tr_t = torch.tensor(Xo_tr, dtype=torch.float32).to(DEVICE)
-        Xo_te_t = torch.tensor(Xo_te, dtype=torch.float32).to(DEVICE)
-        y_tr_t = torch.tensor(y[tr], dtype=torch.float32).to(DEVICE)
-
-        model = DualBranchANN(X_drfp.shape[1], X_other.shape[1], hidden=hidden).to(DEVICE)
-        opt = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-3)
-        sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=20, factor=0.5)
-        ds = TensorDataset(Xd_tr_t, Xo_tr_t, y_tr_t)
-        dl = DataLoader(ds, batch_size=32, shuffle=True)
-
-        best_r2 = -np.inf; best_pred = None; no_imp = 0
-        for ep in range(300):
-            model.train()
-            for xd, xo, yy in dl:
-                opt.zero_grad()
-                nn.MSELoss()(model(xd, xo), yy).backward()
-                opt.step()
-            model.eval()
-            with torch.no_grad():
-                pred = model(Xd_te_t, Xo_te_t).cpu().numpy()
-            r2 = r2_score(y[te], pred)
-            sched.step(1 - r2)
-            if r2 > best_r2:
-                best_r2 = r2; best_pred = pred; no_imp = 0
-            else:
-                no_imp += 1
-            if no_imp >= 40:
-                break
-        best_pred = np.clip(best_pred, 0, 1)
+        best_pred = np.clip(fit_predict_dual(
+            Xd_tr, Xo_tr, y[tr], Xd_te, Xo_te, seed=int(fold_id),
+            hidden=hidden, lr=5e-4, weight_decay=1e-3, batch_size=32,
+            max_epochs=300, patience=40, lr_patience=20, device=str(DEVICE)), 0, 1)
+        best_r2 = r2_score(y[te], best_pred)
         try:
             pr = float(pearsonr(y[te], best_pred)[0])
         except Exception:
@@ -369,6 +275,8 @@ def eval_dual_branch_5fold(X_drfp, X_other, y, n_folds=5, hidden=128):
         })
     fm = pd.DataFrame(fold_records)
     return {
+        "protocol": PERSIST_PROTOCOL,
+        "protocol_note": PERSIST_PROTOCOL_NOTE,
         "r2_mean": float(fm["r2"].mean()),
         "r2_std": float(fm["r2"].std()),
         "mae_mean": float(fm["mae"].mean()),
@@ -428,7 +336,7 @@ def main():
     Xo_s = other_scaler.fit_transform(X_xtb_cond_inter).astype(np.float32)
 
     metrics = eval_dual_branch_5fold(Xd_reduced, Xo_s, y, n_folds=5)
-    print(f"  CV R^2 = {metrics['r2_mean']:.4f} +/- {metrics['r2_std']:.4f}")
+    print(f"  CV R^2 = {metrics['r2_mean']:.4f} +/- {metrics['r2_std']:.4f}  [protocol={metrics['protocol']}: sanity only, NOT an honest estimate]")
     print(f"  CV MAE = {metrics['mae_mean']:.4f}")
     print(f"  CV RMSE = {metrics['rmse_mean']:.4f}")
 
@@ -530,7 +438,8 @@ def main():
         f"  PCL-AE lambda_prop  : {lambda_prop}",
         f"  y range             : [{y.min():.3f}, {y.max():.3f}], mean={y.mean():.3f}",
         "",
-        "  CV metrics (PCL-AE-128 + DualBranchANN, 5-fold, early stop):",
+        "  CV metrics (PCL-AE-128 + DualBranchANN, 5-fold, early stop)"
+        f"  [protocol={metrics['protocol']}; sanity check only, not reported as performance]:",
         f"    R^2      = {metrics['r2_mean']:.4f} +/- {metrics['r2_std']:.4f}",
         f"    MAE      = {metrics['mae_mean']:.4f}",
         f"    RMSE     = {metrics['rmse_mean']:.4f}",

@@ -49,3 +49,8 @@ loguru>=0.7
 # --- external CLIs (not pip-installable; listed for completeness) ---
 # xtb >= 22.1       # https://github.com/grimme-lab/xtb        (used by 104_run_xtb.py)
 # ORCA >= 6.0       # https://orcaforum.cec.mpg.de/           (used by 5xx_*)
+
+# --- optional: UMAP panel in 802_pcl_ae_visualization.py ---
+umap-learn==0.5.12
+pynndescent==0.7.0
+

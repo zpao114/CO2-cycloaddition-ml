@@ -6,7 +6,7 @@ import pandas as pd
 
 # Project root (consumed when inferring default paths for drfp_ablation_meta.json,
 # which is produced by 201_ablation.py at PROJECT_ROOT/results_best_pipeline/).
-PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition")
+PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 # ------------------------------------------------------------
 # DRFP 解析
 # ------------------------------------------------------------

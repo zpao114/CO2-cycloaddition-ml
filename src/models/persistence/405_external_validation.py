@@ -5,9 +5,9 @@
 外部测试集验证（External Validation）
 ======================================
 按照 JCIM OECD QSPR Principle 4 要求：
-  - 从 2338 条数据中随机划分 85% 训练 / 15% 测试（seed=2026）
+  - 按 data_split.json 的标准划分：85% 训练 / 15% 测试（seed=2026）
   - 在完全封闭的测试集上评估所有模型
-  - 与内部 5×2 KFold 结果对比，验证模型是否过拟合
+  - 与训练池内 manifest 5 折 CV 结果对比（7 个模型全部现算），验证模型是否过拟合
 
 输出：
   results_external_validation/
@@ -45,11 +45,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition")
+PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")))
 sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'src'))
-from src.data_split import load_manifest, holdout_arrays, kfold_folds
+from src.data_split import load_manifest, holdout_arrays, kfold_folds, select_train_pool, verify_manifest
 from utils_rxn import read_drfp, get_best_drfp_variant
+from config import BEST_LAMBDA_PROP, PCL_AE_EPOCHS                     # noqa: E402
+from eval_protocol.nets import PropertyCoLearningAE, train_pcl_ae_model  # noqa: E402,F401
+from eval_protocol.models import DualBranchANN                         # noqa: E402,F401
 
 DATA_EXTENDED = os.path.join(PROJECT_ROOT, 'results/results_cho_diagnostic/co2_drfp_xtb_extended.csv')
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'results_external_validation')
@@ -93,10 +96,13 @@ def load_data(use_holdout_train=True):
     df = df.dropna(subset=['yield (%)'])
     df = df[df['yield (%)'] > 0].reset_index(drop=True)
 
+    manifest = load_manifest()
     if use_holdout_train:
-        train_idx, _, _ = holdout_arrays(load_manifest())
-        df = df.iloc[sorted(train_idx)].reset_index(drop=True)
-        logger.info(f'  [load_data] filtered to holdout train pool: {len(df)} rows')
+        df = select_train_pool(df, manifest)   # verifies row_id order + data hash
+        logger.info(f'  [load_data] filtered to holdout train pool: {len(df)} rows (manifest verified)')
+    else:
+        verify_manifest(df, manifest)           # full table: indices stay absolute
+        logger.info(f'  [load_data] full table: {len(df)} rows (manifest verified)')
 
     n = len(df)
     logger.info(f'  有效样本数: {n}')
@@ -179,160 +185,32 @@ def load_data(use_holdout_train=True):
 # =====================================================================
 # 模型定义（复用 08_benchmark.py）
 # =====================================================================
-class PropertyCoLearningAE(nn.Module):
-    def __init__(self, input_dim, latent_dim):
-        super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 512), nn.BatchNorm1d(512), nn.ReLU(), nn.Dropout(0.2),
-            nn.Linear(512, 256), nn.BatchNorm1d(256), nn.ReLU(), nn.Dropout(0.1),
-            nn.Linear(256, latent_dim),
-        )
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 256), nn.ReLU(),
-            nn.Linear(256, 512), nn.BatchNorm1d(512), nn.ReLU(),
-            nn.Linear(512, input_dim), nn.Sigmoid(),
-        )
-        self.predictor = nn.Sequential(
-            nn.Linear(latent_dim, 64), nn.ReLU(), nn.Dropout(0.1),
-            nn.Linear(64, 32), nn.ReLU(),
-            nn.Linear(32, 1),
-        )
-
-    def encode(self, x):
-        return self.encoder(x)
+def train_pcl_ae(X_train, y_train, latent_dim=128, lambda_prop=None,
+                 epochs=PCL_AE_EPOCHS, batch_size=128, lr=1e-3):
+    return train_pcl_ae_model(X_train, y_train, latent_dim, lambda_prop, epochs,
+                              batch_size, lr, device=DEVICE)
 
 
-class DualBranchANN(nn.Module):
-    def __init__(self, drfp_dim, xtb_dim, hidden=128):
-        super().__init__()
-        self.conv1 = nn.Conv1d(1, 32, kernel_size=5, stride=2, padding=2)
-        self.conv2 = nn.Conv1d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.pool = nn.AdaptiveMaxPool1d(1)
-        self.bn_drfp = nn.BatchNorm1d(64)
-        self.fc_drfp = nn.Sequential(
-            nn.Linear(64, hidden), nn.LeakyReLU(0.1), nn.Dropout(0.3),
-            nn.Linear(hidden, 64), nn.LeakyReLU(0.1),
-        )
-        self.fc_xtb = nn.Sequential(
-            nn.Linear(xtb_dim, 64), nn.BatchNorm1d(64), nn.LeakyReLU(0.1), nn.Dropout(0.3),
-            nn.Linear(64, 32), nn.LeakyReLU(0.1), nn.Dropout(0.2),
-        )
-        self.fc_out = nn.Sequential(
-            nn.Linear(64 + 32, 64), nn.BatchNorm1d(64), nn.LeakyReLU(0.1),
-            nn.Linear(64, 1),
-        )
-
-    def forward(self, x_drfp, x_xtb):
-        h = x_drfp.unsqueeze(1)
-        h = torch.relu(self.conv1(h))
-        h = torch.relu(self.conv2(h))
-        h = self.pool(h).squeeze(-1)
-        h = self.bn_drfp(h)
-        h = self.fc_drfp(h)
-        h2 = self.fc_xtb(x_xtb)
-        return self.fc_out(torch.cat([h, h2], dim=1)).squeeze(-1)
 
 
-def get_tree_model(name):
+
+def get_tree_model(name, seed=None):
+    seed = SEED if seed is None else seed
     if name == 'RF':
         return RandomForestRegressor(
             n_estimators=200, max_depth=20, min_samples_leaf=2,
-            n_jobs=-1, random_state=SEED)
+            n_jobs=-1, random_state=seed)
     if name == 'XGB':
         return xgb.XGBRegressor(
             n_estimators=500, max_depth=8, learning_rate=0.05,
             subsample=0.8, colsample_bytree=0.8,
-            tree_method='hist', random_state=SEED, verbosity=0)
+            tree_method='hist', random_state=seed, verbosity=0)
     if name == 'LGBM':
         return lgb.LGBMRegressor(
             n_estimators=500, num_leaves=63, learning_rate=0.05,
             subsample=0.8, colsample_bytree=0.8, min_data_in_leaf=10,
-            device='cpu', verbose=-1, random_state=SEED)
+            device='cpu', verbose=-1, random_state=seed)
     raise ValueError(name)
-
-
-# =====================================================================
-# 训练 PCL-AE
-# =====================================================================
-def train_pcl_ae(X_train, y_train, latent_dim=128, lambda_prop=None,
-                 epochs=150, batch_size=128, lr=1e-3):
-    if lambda_prop is None:
-        from config import BEST_LAMBDA_PROP as lambda_prop
-    X_tensor = torch.FloatTensor(X_train).to(DEVICE)
-    y_tensor = torch.FloatTensor(y_train).unsqueeze(1).to(DEVICE)
-    model = PropertyCoLearningAE(X_train.shape[1], latent_dim).to(DEVICE)
-    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=10, factor=0.5)
-    bce = nn.BCEWithLogitsLoss(reduction='none')
-    mse = nn.MSELoss()
-    pos_weight = 10.0
-    y_mean, y_std_ = float(y_train.mean()), float(y_train.std() + 1e-6)
-    loader = DataLoader(
-        TensorDataset(X_tensor, y_tensor),
-        batch_size=batch_size, shuffle=True)
-
-    for _ in range(epochs):
-        model.train()
-        for xb, yb in loader:
-            opt.zero_grad()
-            z = model.encoder(xb)
-            recon = model.decoder(z)
-            pred = model.predictor(z).squeeze(-1)
-            recon_loss = (bce(recon, xb) * (xb * (pos_weight - 1) + 1)).mean()
-            prop_loss = mse(pred * y_std_ + y_mean, yb.squeeze(-1))
-            loss = recon_loss + lambda_prop * prop_loss
-            loss.backward()
-            opt.step()
-        sched.step(recon_loss.item())
-    model.eval()
-    return model
-
-
-# =====================================================================
-# 训练 DualANN
-# =====================================================================
-def train_dualann(X_drfp_tr, X_xtb_tr, y_tr, X_drfp_val, X_xtb_val, y_val,
-                  hidden=128, epochs=300):
-    Xd_tr_t = torch.tensor(X_drfp_tr, dtype=torch.float32).to(DEVICE)
-    Xd_va_t = torch.tensor(X_drfp_val, dtype=torch.float32).to(DEVICE)
-    Xo_tr_t = torch.tensor(X_xtb_tr, dtype=torch.float32).to(DEVICE)
-    Xo_va_t = torch.tensor(X_xtb_val, dtype=torch.float32).to(DEVICE)
-    y_tr_t = torch.tensor(y_tr, dtype=torch.float32).to(DEVICE)
-
-    model = DualBranchANN(X_drfp_tr.shape[1], X_xtb_tr.shape[1], hidden=hidden).to(DEVICE)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=15, factor=0.5)
-    ds = TensorDataset(Xd_tr_t, Xo_tr_t, y_tr_t)
-    dl = DataLoader(ds, batch_size=64, shuffle=True)
-
-    best_r2 = -np.inf
-    best_state = None
-    no_imp = 0
-
-    for ep in range(epochs):
-        model.train()
-        for xd, xo, yy in dl:
-            opt.zero_grad()
-            loss = nn.MSELoss()(model(xd, xo), yy)
-            loss.backward()
-            opt.step()
-        model.eval()
-        with torch.no_grad():
-            pred = model(Xd_va_t, Xo_va_t).cpu().numpy()
-        r2 = r2_score(y_val, pred)
-        sched.step(1 - r2)
-        if r2 > best_r2:
-            best_r2 = r2
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            no_imp = 0
-        else:
-            no_imp += 1
-        if no_imp >= 40:
-            break
-
-    model.load_state_dict(best_state)
-    model.eval()
-    return model
 
 
 # =====================================================================
@@ -341,9 +219,9 @@ def train_dualann(X_drfp_tr, X_xtb_tr, y_tr, X_drfp_val, X_xtb_val, y_val,
 def evaluate_on_holdout(X_drfp_all, X_xtb_all, y_all,
                         train_idx, test_idx,
                         pcl_lambda=None, latent_dim=128):
-    if pcl_lambda is None:
-        from config import BEST_LAMBDA_PROP as pcl_lambda
     """在 hold-out 集上训练并评估所有模型"""
+    if pcl_lambda is None:
+        pcl_lambda = float(BEST_LAMBDA_PROP)
     Xd_tr = X_drfp_all[train_idx]
     Xd_te = X_drfp_all[test_idx]
     Xo_tr = X_xtb_all[train_idx]
@@ -459,6 +337,11 @@ def evaluate_on_holdout(X_drfp_all, X_xtb_all, y_all,
     with torch.no_grad():
         Zd_tr_ann = pcl_for_ann.encode(torch.FloatTensor(Xd_tr_sa).to(DEVICE)).cpu().numpy()
         Zd_te_ann = pcl_for_ann.encode(torch.FloatTensor(Xd_te_sa).to(DEVICE)).cpu().numpy()
+    # Same latent standardisation (train-fitted) as internal_cv_reference, so the
+    # internal-vs-external DualANN comparison uses one pipeline.
+    s_z_ann = StandardScaler().fit(Zd_tr_ann)
+    Zd_tr_ann = s_z_ann.transform(Zd_tr_ann).astype(np.float32)
+    Zd_te_ann = s_z_ann.transform(Zd_te_ann).astype(np.float32)
 
     # inner split for early stopping
     inner_kf = KFold(n_splits=5, shuffle=True, random_state=SEED + 999)
@@ -637,103 +520,137 @@ def evaluate_on_holdout(X_drfp_all, X_xtb_all, y_all,
 
 
 # =====================================================================
-# 内部 CV 参考（使用相同的种子 42+0×100，与 08_benchmark.py 一致）
+# 内部 CV 参考：与外部评估同一批 7 个模型，在训练池内用 manifest 5 折现算
 # =====================================================================
-def internal_cv_reference(X_drfp_all, X_xtb_all, y_all, n_folds=5, n_repeats=2):
-    """5×2 KFold 参考基准（seed=42，与 08_benchmark.py 一致）"""
-    logger.info('\n  [内部 5×2 KFold 参考基准]')
+def internal_cv_reference(X_drfp_all, X_xtb_all, y_all):
+    """Manifest 5-fold CV on the train pool for every model reported externally.
 
-    all_fold_r2_rf = []
-    all_fold_r2_dualann = []
+    Inputs must already be restricted to the train pool (relative indices from
+    ``kfold_folds``).  Scalers, PCA and PCL-AE are fitted inside each fold.
+    Returns ``{model_name: (mean_r2, std_r2)}``.
+    """
+    from sklearn.decomposition import PCA
+    logger.info('\n  [内部 5-fold CV 参考基准 (manifest folds, 全部现算)]')
 
-    # 5-fold CV using the canonical data_split.json manifest (seed=2026, yield-stratified)
+    fold_r2 = {}
+
+    def _rec(name, y_true, pred):
+        fold_r2.setdefault(name, []).append(r2_score(y_true, np.clip(pred, 0, 1)))
+
     manifest_folds = kfold_folds(load_manifest())
-    for rep in range(n_repeats):
-        for fold_id, tr, te in manifest_folds:
-            sd = StandardScaler()
-            Xd_tr_s = sd.fit_transform(X_drfp_all[tr]).astype(np.float32)
-            Xd_te_s = sd.transform(X_drfp_all[te]).astype(np.float32)
+    if len(y_all) != len(set(i for _, tr_, va_ in manifest_folds for i in list(tr_) + list(va_))):
+        raise ValueError('internal CV inputs are not the manifest train pool')
+    for fold_id, tr, te in manifest_folds:
+        seed_f = SEED + int(fold_id)
+        sd = StandardScaler()
+        Xd_tr_s = sd.fit_transform(X_drfp_all[tr]).astype(np.float32)
+        Xd_te_s = sd.transform(X_drfp_all[te]).astype(np.float32)
 
-            so = StandardScaler()
-            Xo_tr_s = so.fit_transform(X_xtb_all[tr]).astype(np.float32)
-            Xo_te_s = so.transform(X_xtb_all[te]).astype(np.float32)
+        so = StandardScaler()
+        Xo_tr_s = so.fit_transform(X_xtb_all[tr]).astype(np.float32)
+        Xo_te_s = so.transform(X_xtb_all[te]).astype(np.float32)
 
-            # --- PCL-AE latent ---
-            pcl = train_pcl_ae(Xd_tr_s, y_all[tr], latent_dim=128)
+        # --- raw DRFP + XTB trees ---
+        sc_raw = StandardScaler()
+        Xr_tr = sc_raw.fit_transform(np.hstack([X_drfp_all[tr], X_xtb_all[tr]]))
+        Xr_te = sc_raw.transform(np.hstack([X_drfp_all[te], X_xtb_all[te]]))
+        for name in ('RF', 'XGB', 'LGBM'):
+            m_t = get_tree_model(name, seed=seed_f)
+            m_t.fit(Xr_tr, y_all[tr])
+            _rec(name, y_all[te], m_t.predict(Xr_te))
+
+        # --- PCA-128 + RF/XGB ---
+        pca = PCA(n_components=128, random_state=seed_f)
+        Xp_tr = pca.fit_transform(Xd_tr_s).astype(np.float32)
+        Xp_te = pca.transform(Xd_te_s).astype(np.float32)
+        sc_p = StandardScaler()
+        Xpp_tr = sc_p.fit_transform(np.hstack([Xp_tr, X_xtb_all[tr]]))
+        Xpp_te = sc_p.transform(np.hstack([Xp_te, X_xtb_all[te]]))
+        for name in ('RF', 'XGB'):
+            m_t = get_tree_model(name, seed=seed_f)
+            m_t.fit(Xpp_tr, y_all[tr])
+            _rec(f'PCA-128+{name}', y_all[te], m_t.predict(Xpp_te))
+
+        # --- PCL-AE latent ---
+        pcl = train_pcl_ae(Xd_tr_s, y_all[tr], latent_dim=128)
+        with torch.no_grad():
+            Z_tr = pcl.encode(torch.FloatTensor(Xd_tr_s).to(DEVICE)).cpu().numpy()
+            Z_te = pcl.encode(torch.FloatTensor(Xd_te_s).to(DEVICE)).cpu().numpy()
+
+        # --- RF on PCL-AE + XTB ---
+        scaler = StandardScaler()
+        X_tr = scaler.fit_transform(np.hstack([Z_tr, X_xtb_all[tr]]))
+        X_te = scaler.transform(np.hstack([Z_te, X_xtb_all[te]]))
+        m = get_tree_model('RF', seed=seed_f)
+        m.fit(X_tr, y_all[tr])
+        _rec('PCL-AE-128+RF', y_all[te], m.predict(X_te))
+
+        # --- DualANN on PCL-AE latent + XTB ---
+        # 501 模式：Z 再 StandardScaler，从训练集再拆 20% val 做 early stopping
+        inner_kf = KFold(n_splits=5, shuffle=True, random_state=SEED + 999)
+        inner_tr2, inner_va = next(inner_kf.split(Z_tr))
+        Z_tr2 = Z_tr[inner_tr2].astype(np.float32)
+        Z_va = Z_tr[inner_va].astype(np.float32)
+        Xo_tr2 = Xo_tr_s[inner_tr2].astype(np.float32)
+        Xo_va = Xo_tr_s[inner_va].astype(np.float32)
+        y_tr2 = y_all[tr][inner_tr2].astype(np.float32)
+        y_va = y_all[tr][inner_va].astype(np.float32)
+
+        # 与 501 eval_dual_branch_5fold 一致：Z 也走 StandardScaler
+        sd_z = StandardScaler()
+        Z_tr2 = sd_z.fit_transform(Z_tr2).astype(np.float32)
+        Z_va = sd_z.transform(Z_va).astype(np.float32)
+        Z_te = sd_z.transform(Z_te).astype(np.float32)
+
+        Z_te_t = torch.FloatTensor(Z_te).to(DEVICE)
+        Xo_te_t = torch.FloatTensor(Xo_te_s).to(DEVICE)
+
+        model = DualBranchANN(Z_tr2.shape[1], Xo_tr2.shape[1], hidden=128).to(DEVICE)
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+        sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=15, factor=0.5)
+        Z_tr2_t = torch.FloatTensor(Z_tr2).to(DEVICE)
+        Z_va_t = torch.FloatTensor(Z_va).to(DEVICE)
+        Xo_tr2_t = torch.FloatTensor(Xo_tr2).to(DEVICE)
+        Xo_va_t = torch.FloatTensor(Xo_va).to(DEVICE)
+        y_tr2_t = torch.FloatTensor(y_tr2).to(DEVICE)
+        loader = DataLoader(TensorDataset(Z_tr2_t, Xo_tr2_t, y_tr2_t), batch_size=64, shuffle=True)
+
+        # Early stopping / LR schedule use the INNER validation split
+        # (carved from the training fold); the test fold is predicted once
+        # with the best-validation checkpoint.
+        best_r2, best_state, no_imp = -np.inf, None, 0
+        for ep in range(200):
+            model.train()
+            for z, xo, yy in loader:
+                opt.zero_grad()
+                loss = nn.MSELoss()(model(z, xo), yy)
+                loss.backward()
+                opt.step()
+            model.eval()
             with torch.no_grad():
-                Z_tr = pcl.encode(torch.FloatTensor(Xd_tr_s).to(DEVICE)).cpu().numpy()
-                Z_te = pcl.encode(torch.FloatTensor(Xd_te_s).to(DEVICE)).cpu().numpy()
+                pred_v = model(Z_va_t, Xo_va_t).cpu().numpy().squeeze()
+            r2 = r2_score(y_va, np.clip(pred_v, 0, 1))
+            sched.step(1 - r2)
+            if r2 > best_r2:
+                best_r2 = r2
+                best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+                no_imp = 0
+            else:
+                no_imp += 1
+            if no_imp >= 40:
+                break
+        model.load_state_dict(best_state)
+        model.eval()
+        with torch.no_grad():
+            best_pred = model(Z_te_t, Xo_te_t).cpu().numpy().squeeze()
+        _rec('PCL-AE-128+DualANN', y_all[te], best_pred)
+        logger.info(f'    fold {fold_id}: done')
 
-            # --- RF on PCL-AE + XTB ---
-            scaler = StandardScaler()
-            X_tr = scaler.fit_transform(np.hstack([Z_tr, X_xtb_all[tr]]))
-            X_te = scaler.transform(np.hstack([Z_te, X_xtb_all[te]]))
-            m = get_tree_model('RF')
-            m.fit(X_tr, y_all[tr])
-            pred_rf = np.clip(m.predict(X_te), 0, 1)
-            all_fold_r2_rf.append(r2_score(y_all[te], pred_rf))
-
-            # --- DualANN on PCL-AE latent + XTB ---
-            # 501 模式：Z 再 StandardScaler，从训练集再拆 20% val 做 early stopping
-            inner_kf = KFold(n_splits=5, shuffle=True, random_state=SEED + 999)
-            inner_tr2, inner_va = next(inner_kf.split(Z_tr))
-            Z_tr2 = Z_tr[inner_tr2].astype(np.float32)
-            Z_va = Z_tr[inner_va].astype(np.float32)
-            Xo_tr2 = Xo_tr_s[inner_tr2].astype(np.float32)
-            Xo_va = Xo_tr_s[inner_va].astype(np.float32)
-            y_tr2 = y_all[tr][inner_tr2].astype(np.float32)
-            y_va = y_all[tr][inner_va].astype(np.float32)
-
-            # 与 501 eval_dual_branch_5fold 一致：Z 也走 StandardScaler
-            sd_z = StandardScaler()
-            Z_tr2 = sd_z.fit_transform(Z_tr2).astype(np.float32)
-            Z_va = sd_z.transform(Z_va).astype(np.float32)
-            Z_te = sd_z.transform(Z_te).astype(np.float32)
-
-            Z_tr2_t = torch.FloatTensor(Z_tr2).to(DEVICE)
-            Z_va_t = torch.FloatTensor(Z_va).to(DEVICE)
-            Z_te_t = torch.FloatTensor(Z_te).to(DEVICE)
-            Xo_tr2_t = torch.FloatTensor(Xo_tr2).to(DEVICE)
-            Xo_va_t = torch.FloatTensor(Xo_va).to(DEVICE)
-            Xo_te_t = torch.FloatTensor(Xo_te_s).to(DEVICE)
-            y_tr2_t = torch.FloatTensor(y_tr2).to(DEVICE)
-
-            model = DualBranchANN(Z_tr2.shape[1], Xo_tr2.shape[1], hidden=128).to(DEVICE)
-            opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-            sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=15, factor=0.5)
-            loader = DataLoader(TensorDataset(Z_tr2_t, Xo_tr2_t, y_tr2_t), batch_size=64, shuffle=True)
-
-            best_r2, best_pred, no_imp = -np.inf, None, 0
-            for ep in range(200):
-                model.train()
-                for z, xo, yy in loader:
-                    opt.zero_grad()
-                    loss = nn.MSELoss()(model(z, xo), yy)
-                    loss.backward()
-                    opt.step()
-                model.eval()
-                with torch.no_grad():
-                    pred = model(Z_te_t, Xo_te_t).cpu().numpy().squeeze()
-                r2 = r2_score(y_all[te], np.clip(pred, 0, 1))
-                sched.step(1 - r2)
-                if r2 > best_r2:
-                    best_r2 = r2
-                    best_pred = pred
-                    no_imp = 0
-                else:
-                    no_imp += 1
-                if no_imp >= 40:
-                    break
-            best_pred = np.clip(best_pred, 0, 1)
-            all_fold_r2_dualann.append(r2_score(y_all[te], best_pred))
-
-    cv_r2_rf_mean = np.mean(all_fold_r2_rf)
-    cv_r2_rf_std = np.std(all_fold_r2_rf)
-    cv_r2_da_mean = np.mean(all_fold_r2_dualann)
-    cv_r2_da_std = np.std(all_fold_r2_dualann)
-    logger.info(f'    PCL-AE-128+RF    5×2 KFold: R²={cv_r2_rf_mean:.4f}±{cv_r2_rf_std:.4f}')
-    logger.info(f'    PCL-AE-128+DualANN 5×2 KFold: R²={cv_r2_da_mean:.4f}±{cv_r2_da_std:.4f}')
-    return (cv_r2_rf_mean, cv_r2_rf_std), (cv_r2_da_mean, cv_r2_da_std)
+    out = {}
+    for name, vals in fold_r2.items():
+        out[name] = (float(np.mean(vals)), float(np.std(vals)))
+        logger.info(f'    {name:<20} 5-fold CV: R²={out[name][0]:.4f}±{out[name][1]:.4f}')
+    return out
 
 
 # =====================================================================
@@ -755,19 +672,19 @@ def main():
     torch.manual_seed(SEED)
 
     # [Step 0] 加载数据
-    X_drfp, X_xtb, y, df_clean, xtb_cols = load_data()
+    X_drfp, X_xtb, y, df_clean, xtb_cols = load_data(use_holdout_train=False)
     n = len(y)
     logger.info(f'\n总样本: {n}, 产率范围: [{y.min():.3f}, {y.max():.3f}]')
 
-    # [Step 1] 划分训练/测试集
-    logger.info(f'\n[Step 1] 划分训练/测试集 (seed={SEED})')
-    indices = np.arange(n)
-    np.random.shuffle(indices)
-    n_test = int(n * HOLDOUT_RATIO)
-    test_idx = indices[:n_test]
-    train_idx = indices[n_test:]
-    logger.info(f'  训练集: {len(train_idx)} 样本 ({1-HOLDOUT_RATIO:.0%})')
-    logger.info(f'  测试集: {n_test} 样本 ({HOLDOUT_RATIO:.0%})')
+    # [Step 1] 使用 data_split.json 的权威 holdout（绝对索引，不再二次随机切分）
+    logger.info('\n[Step 1] 读取 manifest holdout 划分')
+    train_idx, test_idx, _ = holdout_arrays(load_manifest())
+    train_idx = np.array(sorted(train_idx), dtype=int)
+    test_idx = np.array(sorted(test_idx), dtype=int)
+    assert not set(train_idx) & set(test_idx), 'manifest train/test overlap'
+    n_test = len(test_idx)
+    logger.info(f'  训练集: {len(train_idx)} 样本')
+    logger.info(f'  测试集: {n_test} 样本 (manifest holdout)')
 
     # 测试集分布报告
     df_test = df_clean.iloc[test_idx].copy()
@@ -806,11 +723,9 @@ def main():
 
     # [Step 3] 内部 CV 参考
     logger.info('\n' + '=' * 72)
-    logger.info('  [Step 3] 内部 5×2 KFold 参考基准')
+    logger.info('  [Step 3] 内部 5-fold CV 参考基准（全部模型现算）')
     logger.info('=' * 72)
-    cv_r2_rf, cv_r2_da = internal_cv_reference(X_drfp, X_xtb, y)
-    cv_r2_rf_mean, cv_r2_rf_std = cv_r2_rf
-    cv_r2_da_mean, cv_r2_da_std = cv_r2_da
+    cv_results = internal_cv_reference(X_drfp[train_idx], X_xtb[train_idx], y[train_idx])
 
     # [Step 4] 保存结果
     logger.info('\n' + '=' * 72)
@@ -843,15 +758,10 @@ def main():
     logger.info(f'  {"模型":<25} {"内部CV R²":>12} {"外部Test R²":>12} {"差值Δ":>8}')
     logger.info(f'  {"-"*25} {"-"*12} {"-"*12} {"-"*8}')
 
-    internal_r2 = {
-        'RF':                  0.288,   # from 08_benchmark.py: raw DRFP + RF
-        'XGB':                 0.285,   # from 08_benchmark.py: PCA-256 + XGB
-        'LGBM':                0.287,   # from 08_benchmark.py: PCA-256 + LGBM
-        'PCA-128+RF':          0.277,   # from 08_benchmark.py
-        'PCA-128+XGB':         0.277,   # from 08_benchmark.py
-        'PCL-AE-128+RF':       cv_r2_rf_mean,   # computed in Step 3
-        'PCL-AE-128+DualANN':  cv_r2_da_mean,   # computed in Step 3
-    }
+    internal_r2 = {name: mean for name, (mean, _std) in cv_results.items()}
+    missing_cv = [m for m in df_results['model'] if m not in internal_r2]
+    if missing_cv:
+        raise RuntimeError(f'no internal CV computed for: {missing_cv}')
 
     comparison = []
     for model_name in df_results['model'].values:

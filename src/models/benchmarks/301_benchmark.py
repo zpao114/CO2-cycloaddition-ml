@@ -14,8 +14,16 @@ Workflow:
     Part B  XTB-only baseline (sanity check on electronic descriptors)
     Part C  XGB + LGBM + DualANN ensemble on the best feature set
 
+Protocols (--protocol):
+    honest           (default) DRFP reduction (scaler/PCA/AE/PCL-AE) fitted on the
+                     TRAINING rows of every fold only
+    transductive_x   reduction sees every row's X but no test labels
+    pretrain_frozen  reduction sees every row's X and y (legacy PCL-AE protocol)
+    presplit         legacy code path (whole-table reduction before the split);
+                     kept as a control for the Delta_protocol comparison
+
 Usage:
-    python 301_benchmark.py
+    python 301_benchmark.py [--protocol honest|transductive_x|pretrain_frozen|presplit]
     (201_ablation.py must have run first to produce the meta file)
 """
 import os
@@ -57,15 +65,19 @@ warnings.filterwarnings('ignore')
 import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition")
+PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")))
 sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'src'))
+from eval_protocol.models import fit_predict_dual  # noqa: E402  (inner-val early stopping)
+from eval_protocol.benchmark import (FoldReducer, cv_tree, cv_dual, cv_ensemble,  # noqa: E402
+                                     part_a_rows, DUAL_HP_DEFAULT)
 
 from utils_benchmark import (
     parse_drfp_col, load_data, eval_sklearn_model, eval_dual_branch,
     DualBranchANN, X_inter_base, DEVICE, OUTPUT_DIR,
-    train_standard_ae, train_pcl_ae, get_tree_model,
+    train_standard_ae, train_pcl_ae, get_tree_model, BEST_LAMBDA_PROP,
 )
+import argparse
 
 import torch
 import torch.nn as nn
@@ -91,8 +103,24 @@ def load_best_variant_from_meta():
     return meta['best_variant'], meta['best_label'], meta['best_r2']
 
 
+def _parse_protocol():
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument('--protocol', default='honest',
+                    choices=['honest', 'transductive_x', 'pretrain_frozen', 'presplit'])
+    args, _ = ap.parse_known_args()
+    return args.protocol
+
+
+DUAL_HP = DUAL_HP_DEFAULT
+
+
+TREES_ALL = ['RF', 'XGB', 'LGBM']
+
+
 def main():
     t0 = time.time()
+    PROTOCOL = _parse_protocol()
+    print(f'  >> 评估协议 protocol = {PROTOCOL}  |  lambda_prop = {float(BEST_LAMBDA_PROP)}')
     print('=' * 72)
     print('  301 -- CO2 环加成主基准流水线')
     print('  PCA 128/256 + PCL-AE + 全特征组合')
@@ -146,6 +174,7 @@ def main():
     all_results = []
     best_r2 = -np.inf
     best_tag = ''
+    folds_cv = kfold_folds(load_manifest())
 
     TREES = ['RF', 'XGB', 'LGBM']
 
@@ -157,6 +186,14 @@ def main():
     print('=' * 72)
 
     for method, dim, label in DRFP_REDUCE_METHODS:
+        if PROTOCOL != 'presplit':
+            for row, tag in part_a_rows(method, label, X_drfp, X_xtb, X_xtb_cond,
+                                        X_xtb_cond_inter, y, folds_cv, PROTOCOL,
+                                        lam=float(BEST_LAMBDA_PROP), device=str(DEVICE)):
+                all_results.append(row)
+                if row['r2_mean'] > best_r2:
+                    best_r2, best_tag = row['r2_mean'], tag
+            continue
         if method == 'raw':
             X_drfp_red = X_drfp
         else:
@@ -272,7 +309,8 @@ def main():
 
     # ============================================================
     # Part C: Ensemble (XGB + LGBM + DualANN 等权平均)
-    # 与 Part A/B 一致，采用 n_repeats=3 (15 folds) 重复 KFold，
+    # 与 Part A/B 一致：固定 manifest 的 5 折 × 3 个模型种子重复（折固定，仅重设模型种子，
+    # 并非 15 个独立折），
     # 最终 R² 取每折 pooled R² 的 mean/std，使 Part C 与 A/B 统计可比。
     # ============================================================
     print('\n' + '=' * 72)
@@ -285,7 +323,26 @@ def main():
     for fsname in ['PCA-256 DRFP + XTB + Cond + Inter',
                    'PCA-128 DRFP + XTB + Cond + Inter',
                    'DRFP + XTB + Cond + Inter']:
-        # DRFP 处理
+        if PROTOCOL != 'presplit':
+            _m = 'pca256' if 'PCA-256' in fsname else ('pca128' if 'PCA-128' in fsname else 'raw')
+            red = FoldReducer(X_drfp, y, folds_cv, method=_m, scope=PROTOCOL,
+                              lam=float(BEST_LAMBDA_PROP), device=str(DEVICE))
+            met = cv_ensemble(red, X_xtb_cond_inter, y, n_repeats=N_REPEATS_ENS, seed0=0,
+                              device=str(DEVICE), **DUAL_HP)
+            print(f'\n[{fsname}]  protocol={PROTOCOL}')
+            print(f'  Ensemble (mean of {N_REPEATS_ENS} pooled) R2 = {met["r2_mean"]:.4f} '
+                  f'+- {met["r2_std"]:.4f}  MAE={met["mae_mean"]:.4f}  '
+                  f'RMSE={met["rmse_mean"]:.4f}  Pearson={met["pearson_mean"]:.4f}')
+            all_results.append({
+                'stage': 'C_ensemble', 'drfp_method': fsname, 'feature_set': 'ensemble',
+                'model': 'Ensemble',
+                **{k: met[k] for k in ['r2_mean', 'r2_std', 'mae_mean', 'rmse_mean', 'pearson_mean']},
+                'feature_dim': red.dim() + X_xtb_cond_inter.shape[1], 'time_s': 0.0,
+            })
+            if met['r2_mean'] > best_r2:
+                best_r2, best_tag = met['r2_mean'], f'Ensemble on {fsname}'
+            continue
+        # DRFP 处理 (legacy pre-split path)
         if 'PCA-256' in fsname:
             Xd_red = PCA(n_components=256, random_state=42).fit_transform(
                 StandardScaler().fit_transform(X_drfp)
@@ -306,7 +363,7 @@ def main():
         for rep in range(N_REPEATS_ENS):
             oof = np.zeros(n, dtype=np.float32)
             oof_count = np.zeros(n, dtype=np.float32)
-            for tr, te in [(tr, te) for _, tr, te in ens_folds]:
+            for _fold_i, (tr, te) in enumerate([(tr, te) for _, tr, te in ens_folds]):
                 sd = StandardScaler(); so = StandardScaler()
                 Xd_tr = sd.fit_transform(Xd_red[tr])
                 Xd_te = sd.transform(Xd_red[te])
@@ -315,46 +372,19 @@ def main():
                 Xf_tr = np.hstack([Xd_tr, Xo_tr])
                 Xf_te = np.hstack([Xd_te, Xo_te])
 
-                xgbm = get_tree_model('XGB')
+                xgbm = get_tree_model('XGB', seed=1000 * rep + _fold_i)
                 xgbm.fit(Xf_tr, y[tr])
                 pred_xgb = np.clip(xgbm.predict(Xf_te), 0, 1)
 
-                lgbm = get_tree_model('LGBM')
+                lgbm = get_tree_model('LGBM', seed=1000 * rep + _fold_i)
                 lgbm.fit(Xf_tr, y[tr])
                 pred_lgb = np.clip(lgbm.predict(Xf_te), 0, 1)
 
-                Xd_tr_t = torch.tensor(Xd_tr, dtype=torch.float32).to(DEVICE)
-                Xd_te_t = torch.tensor(Xd_te, dtype=torch.float32).to(DEVICE)
-                Xo_tr_t = torch.tensor(Xo_tr, dtype=torch.float32).to(DEVICE)
-                Xo_te_t = torch.tensor(Xo_te, dtype=torch.float32).to(DEVICE)
-                y_tr_t = torch.tensor(y[tr], dtype=torch.float32).to(DEVICE)
-                model = DualBranchANN(Xd_red.shape[1], X_xtb_cond_inter.shape[1], 128).to(DEVICE)
-                opt = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-3)
-                sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=20, factor=0.5)
-                ds = TensorDataset(Xd_tr_t, Xo_tr_t, y_tr_t)
-                dl = DataLoader(ds, batch_size=32, shuffle=True)
-                best_r2_ann = -np.inf; best_pred_ann = None; no_imp = 0
-                for ep in range(250):
-                    model.train()
-                    for xd, xo, yy in dl:
-                        opt.zero_grad()
-                        loss = nn.MSELoss()(model(xd, xo), yy)
-                        loss.backward()
-                        opt.step()
-                    model.eval()
-                    with torch.no_grad():
-                        p = model(Xd_te_t, Xo_te_t).cpu().numpy()
-                    r2 = r2_score(y[te], p)
-                    sched.step(1 - r2)
-                    if r2 > best_r2_ann:
-                        best_r2_ann = r2
-                        best_pred_ann = p
-                        no_imp = 0
-                    else:
-                        no_imp += 1
-                    if no_imp >= 40:
-                        break
-                pred_ann = np.clip(best_pred_ann, 0, 1)
+                # DualANN: early stopping on an inner split of the TRAIN fold only
+                pred_ann = np.clip(fit_predict_dual(
+                    Xd_tr, Xo_tr, y[tr], Xd_te, Xo_te, seed=1000 * rep + _fold_i,
+                    hidden=128, lr=5e-4, weight_decay=1e-3, batch_size=32,
+                    max_epochs=250, patience=40, lr_patience=20, device=str(DEVICE)), 0, 1)
 
                 oof[te] += (pred_xgb + pred_lgb + pred_ann) / 3.0
                 oof_count[te] += 1
@@ -409,7 +439,12 @@ def main():
     # 每个变体独立训练，输出 R²/RMSE/MAE，量化各组分的贡献
     # ============================================================
     df_all = pd.DataFrame(all_results).sort_values('r2_mean', ascending=False)
-    out_csv = os.path.join(OUTPUT_DIR, 'full_benchmark_results.csv')
+    df_all.insert(0, 'protocol', PROTOCOL)
+    df_all['lambda_prop'] = float(BEST_LAMBDA_PROP)
+    # honest -> canonical file; every other protocol gets its own suffixed file
+    _name = 'full_benchmark_results.csv' if PROTOCOL == 'honest' \
+        else f'full_benchmark_results_{PROTOCOL}.csv'
+    out_csv = os.path.join(OUTPUT_DIR, _name)
     df_all.to_csv(out_csv, index=False, encoding='utf-8-sig')
 
     elapsed_total = time.time() - t0

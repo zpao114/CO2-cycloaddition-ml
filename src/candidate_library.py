@@ -4,7 +4,7 @@ candidate_library.py
 
 Shared library definitions and feature-building functions for 402
 (virtual screening) and 404 (hypothetical screening). Centralised so the
-two scripts stay in sync 鈥� a reactant / catalyst added to 402's library
+two scripts stay in sync - a reactant / catalyst added to 402's library
 automatically flows into 404's augmented pool without code duplication.
 
 Re-exported:

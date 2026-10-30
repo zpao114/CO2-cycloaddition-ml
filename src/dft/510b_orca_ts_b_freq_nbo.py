@@ -92,7 +92,7 @@ except Exception:
     pass
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-PROJECT_ROOT = Path(os.environ.get("CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition"))  # Windows path (resolved by Windows python.exe)
+PROJECT_ROOT = Path(os.environ.get("CO2_PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))))  # Windows path (resolved by Windows python.exe)
 TS_ROOT      = PROJECT_ROOT / "dft_validation" / "ts_search_b"
 CLEANED_CSV  = PROJECT_ROOT / 'data/processed/cleaned.csv'
 DFT_WORK_DIR = Path("/home/zzj/orca/dft_work")      # WSL Linux path

@@ -4,7 +4,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition")
+PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 sys.path.insert(0, PROJECT_ROOT)
 from utils_rxn import read_drfp
 
@@ -61,29 +61,57 @@ COND_COL_ALIASES = {
 
 
 def find_cond_cols(df, include_loading=False):
-    """Return the subset of COND_COLS actually present in df.
+    """Return the REAL column names in df for temperature, pressure and time.
+
+    The result is always ordered temperature, pressure, time (then catalyst
+    loadings if requested). Downstream interaction terms rely on this order
+    (``X_cond[:, 0]`` is temperature, ``X_cond[:, 1]`` is pressure), so do not
+    reorder it.
+
+    The returned names are the names that exist in ``df.columns`` (resolved
+    through COND_COL_ALIASES), so ``df[find_cond_cols(df)]`` always works.
+    Use ``COND_COLS`` only when you need the canonical labels.
 
     Parameters
     ----------
     df : pd.DataFrame
         Feature matrix.
     include_loading : bool, default False
-        If True, also include any column whose name contains 'loading_mol%'
-        (catalyst loading), useful for SSTS-style per-catalyst analyses.
+        If True, also append every column whose name contains 'loading_mol%'
+        (catalyst loading), in the order they appear in df.
 
     Returns
     -------
     list[str]
-        List of canonical column names present in df.
+        Column names present in df. A missing condition is skipped, so the
+        list can be shorter than 3 (+ loadings); callers that need all three
+        should use ``require_cond_cols``.
     """
     cols = []
     for canonical in COND_COLS:
         for alias in COND_COL_ALIASES.get(canonical, [canonical]):
             if alias in df.columns:
-                cols.append(canonical)  # Return canonical name
+                cols.append(alias)  # real column name, not the canonical label
                 break
     if include_loading:
         cols += [c for c in df.columns if 'loading_mol%' in c]
+    return cols
+
+
+def require_cond_cols(df, include_loading=False):
+    """Like ``find_cond_cols`` but raise if temperature, pressure or time is missing.
+
+    Use in training scripts so that a renamed column cannot silently shrink
+    the Cond block (the failure mode that previously dropped temperature).
+    """
+    cols = find_cond_cols(df, include_loading=include_loading)
+    n_core = len(cols) - (len([c for c in cols if 'loading_mol%' in c]) if include_loading else 0)
+    if n_core != len(COND_COLS):
+        raise KeyError(
+            f"Expected {len(COND_COLS)} condition columns (temperature, pressure, time) "
+            f"but resolved {n_core}: {cols}. Available temperature-like columns: "
+            f"{[c for c in df.columns if 'temp' in c.lower()]}"
+        )
     return cols
 
 

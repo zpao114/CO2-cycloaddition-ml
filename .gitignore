@@ -115,41 +115,29 @@ data/external/
 !data/processed/**
 
 # ============================================================
-# figures/ — only paper English figures + SVG logos
+# figures/ — only the main-text paper figures (PNG) are committed
 # ============================================================
-figures/*.pdf
-figures/*.svg
-figures/*_zh.*
-figures/fig1_protocol_comparison_v3.*
-figures/fig2_loso_quality_v3.*
-figures/fig3_coverage_5x5_v3.*
-figures/fig4_shap_per_substrate_v3.*
-figures/fig5_homo_vs_yield_v3.*
-figures/fig5_loso_protocol.*
-figures/test_*
-figures/si_fig_*.png
-
-# paper figures
-!figures/fig0_graphical_abstract_en.png
-!figures/fig0_graphical_abstract_en.pdf
+figures/*
 !figures/fig1_data_overview_en.png
-!figures/fig1_data_overview_en.pdf
-!figures/fig1_protocol_comparison_en.png
-!figures/fig1_protocol_comparison_en.pdf
-!figures/fig2_loso_root_cause_en.png
-!figures/fig2_loso_root_cause_en.pdf
-!figures/fig3_coverage_matrix_en.png
-!figures/fig3_coverage_matrix_en.pdf
-!figures/fig4_shap_direction_en.png
-!figures/fig4_shap_direction_en.pdf
-!figures/fig5_ablation_en.png
-!figures/fig5_ablation_en.pdf
-!figures/fig6_latent_space_en.png
-!figures/fig6_latent_space_en.pdf
+!figures/fig2_protocol_comparison_en.png
+!figures/fig3_loso_root_cause_en.png
+!figures/fig6_ablation_en.png
+!figures/workflow_figure_1.png
+!figures/fig0_toc_en.png
+# root-level stray figure files (not committed)
+fig0_graphical_abstract.*
+fig4_loso_root_cause.*
+fig6_transferability_matrix.*
+fig7_shap_direction.*
+fig_toc.*
 
 # ============================================================
 # dft_validation/
 # ============================================================
+dft_validation/*.xtb.stdout
+dft_validation/*.inp_atom53.xtb.stdout
+dft_validation/dft_validation_plan.md
+dft_validation/README_DFT.txt
 dft_validation/sp_5_subs/sp_*.inp
 dft_validation/sp_5_subs/*.xyz
 dft_validation/sp_5_subs/*.property.txt
@@ -215,16 +203,11 @@ src/analysis/_main_with_seed.py
 src/analysis/_verify_split_v2.py
 src/analysis/_verify_split_v3.py
 src/analysis/regenerate_loso_predictions.py
-src/analysis/loso/
 
 # Author/Cursor docx-conversion workflow (kept locally only, never commit)
 src/analysis/diagnostics/convert_paper_to_docx.py
 src/analysis/diagnostics/convert_paper_to_docx_zh.py
 src/analysis/diagnostics/convert_si_to_docx.py
-
-# paper-promised
-!src/analysis/pcl_ae_fair_comparison_multiseed.py
-!src/analysis/external_holdout_multiseed_v2.py
 
 # ============================================================
 # scripts/ — not in paper
@@ -251,4 +234,85 @@ rewrite_s7.py
 figures/fig6_energy_levels_en.py
 figures/fig7_latent_space_en.py
 tools/
-configs/
+
+# ============================================================
+# docs/ — manuscript & internal documentation NOT committed
+# ============================================================
+docs/
+
+# ============================================================
+# src/visualization/ — figure-generation scripts NOT committed
+# ============================================================
+src/visualization/
+
+# ============================================================
+# src/analysis/diagnostics/ — keep only the 900-903 analysis scripts
+# ============================================================
+src/analysis/diagnostics/generate_paper_figures_en.py
+src/analysis/diagnostics/generate_paper_figures_zh.py
+src/analysis/diagnostics/generate_shap_for_901.py
+src/analysis/diagnostics/generate_optimization_comparison.py
+src/analysis/diagnostics/convert_proposal_to_docx.py
+src/analysis/diagnostics/convert_translations_to_docx.py
+src/analysis/diagnostics/CHANGELOG_converter.md
+src/analysis/diagnostics/IMAGE_FIX_REPORT.md
+src/analysis/diagnostics/README.md
+src/analysis/diagnostics/diff_out.txt
+src/analysis/diagnostics/integrity.txt
+src/analysis/diagnostics/refs_full.txt
+src/analysis/diagnostics/optimization_comparison.png
+src/analysis/diagnostics/*总结.md
+
+# ============================================================
+# paper_text/ — not in repo
+# ============================================================
+paper_text/
+
+# ============================================================
+# local extra results_* (not paper-promised) — NOT committed
+# ============================================================
+results_drfp_ablation_deep/
+results_eval_controls/
+results_orchestrator/
+results_publication_bias_sensitivity/
+
+# ============================================================
+# Author-local temp / backups / audit docs — NOT committed
+# ============================================================
+_tmp_*
+_t.png
+AUDIT_REPORT.md
+FULL_RUN_PIPELINE.md
+REBUILD_SUMMARY.md
+_review_plan.md
+jcim_checklist.pdf
+_audit_shards/
+_baseline_pre_fix_20261028/
+_phaseD_backup_20261029/
+_proofread_fix_work/
+_si_fig_originals_backup/
+sp_*.out 2
+configs/project.yaml
+
+# ============================================================
+# Repo scope — core pipeline only
+# (data -> features -> models -> RSEP eval -> DFT validation)
+# Analysis / SI-artifact / figure / test scripts are kept locally,
+# not committed.
+# ============================================================
+src/orchestrator.py
+src/analysis/
+src/ci_artifacts/
+tests/
+src/models/screening/
+src/models/benchmarks/*
+!src/models/benchmarks/__init__.py
+!src/models/benchmarks/301_benchmark.py
+src/data/104b_run_xtb_extended.py
+src/data/201_ablation.py
+src/data/802_pcl_ae_visualization.py
+src/data/108_rebuild_from_registry.py
+src/data/chem_registry.py
+src/data/probe_ext_names.py
+src/data_overview.py
+src/shap_explanation.py

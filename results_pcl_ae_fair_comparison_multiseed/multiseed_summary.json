@@ -1,4 +1,92 @@
 {
+  "producer": "pcl_ae_fair_comparison_multiseed.py",
+  "authoritative_for": [
+    "delta_protocol",
+    "delta_honest"
+  ],
+  "delta_protocol": {
+    "definition": "R2(pretrain_frozen cached latent) - R2(per-fold retrained latent), same LOSO split, same regressor; three views: seed-paired (paired_test) / substrate-paired (substrate_level) / (seed, substrate) sensitivity (paired_test_25pairs)",
+    "PCL-AE": {
+      "cells": "C1 - C3",
+      "mean": 0.4036013102531434,
+      "std": 0.06557138390527484,
+      "per_seed": [
+        0.3303415298461914,
+        0.3759178876876831,
+        0.3724029541015625,
+        0.49575872421264644,
+        0.4435854554176331
+      ],
+      "paired_test": {
+        "mean_diff": 0.4036013102531434,
+        "n": 5,
+        "t_p": 0.0001614829144981673,
+        "wilcoxon_p": 0.0625
+      },
+      "paired_test_25pairs": {
+        "mean_diff": 0.40360131025314333,
+        "n": 25,
+        "t_p": 1.870291216752909e-05,
+        "wilcoxon_p": 1.1920928955078125e-07,
+        "caveat": "pairs are not independent (same substrate across seeds, same seed across substrates); sensitivity analysis only, not a substitute for a cluster bootstrap over substrates"
+      },
+      "substrate_level": {
+        "mean_diff": 0.4036013102531433,
+        "n": 5,
+        "t_p": 0.06297520680002273,
+        "wilcoxon_p": 0.0625,
+        "n_positive": 5,
+        "per_substrate": {
+          "Cyclohexene oxide": 1.0056374311447143,
+          "Epichlorohydrin": 0.3781002998352051,
+          "Isopropyl glycidyl ether": 0.3353740334510803,
+          "Propylene oxide": 0.11669349670410156,
+          "Styrene oxide": 0.18220129013061523
+        },
+        "note": "seed-averaged, one pair per held-out substrate (the independent unit); with n=5 the smallest attainable two-sided Wilcoxon p is 0.0625"
+      }
+    },
+    "StdAE": {
+      "cells": "C2 - C4",
+      "mean": -0.08683075428009031,
+      "std": 0.9891596734540767,
+      "per_seed": [
+        -0.1620397329330444,
+        -0.6687065362930297,
+        -0.4468909740447998,
+        -0.7870957851409911,
+        1.6305792570114137
+      ],
+      "paired_test": {
+        "mean_diff": -0.08683075428009031,
+        "n": 5,
+        "t_p": 0.8539543762810838,
+        "wilcoxon_p": 0.625
+      },
+      "paired_test_25pairs": {
+        "mean_diff": -0.08683075428009034,
+        "n": 25,
+        "t_p": 0.8625788185742478,
+        "wilcoxon_p": 0.02027493715286255,
+        "caveat": "pairs are not independent (same substrate across seeds, same seed across substrates); sensitivity analysis only, not a substitute for a cluster bootstrap over substrates"
+      },
+      "substrate_level": {
+        "mean_diff": -0.08683075428009031,
+        "n": 5,
+        "t_p": 0.8893391813120443,
+        "wilcoxon_p": 1.0,
+        "n_positive": 2,
+        "per_substrate": {
+          "Cyclohexene oxide": 0.25094680786132795,
+          "Epichlorohydrin": 1.9387256145477296,
+          "Isopropyl glycidyl ether": -0.2040964126586915,
+          "Propylene oxide": -0.9748800277709961,
+          "Styrene oxide": -1.4448497533798217
+        },
+        "note": "seed-averaged, one pair per held-out substrate (the independent unit); with n=5 the smallest attainable two-sided Wilcoxon p is 0.0625"
+      }
+    }
+  },
   "config": {
     "seeds": [
       42,
@@ -7,65 +95,115 @@
       9998,
       7777
     ],
-    "per_fold_epochs": 120,
-    "xgb_n_estimators": 400
+    "per_fold_epochs": 150,
+    "xgb_n_estimators": 400,
+    "std_r2_note": "C1/C2: SD over LOSO substrates of the seed-averaged R2; C3/C4: SD over seeds of the fold-averaged R2"
   },
   "cells": {
     "Cell 1 PCL-AE_cached": {
-      "mean_r2": 0.25081740617752074,
-      "std_r2": 0.14057512166821257,
-      "n_folds": 5
+      "mean_r2": -0.1361311173439026,
+      "std_r2": 0.19610443921605153,
+      "n_folds": 5,
+      "per_seed": [
+        -0.13837821483612062,
+        -0.15354492664337158,
+        -0.08388423919677734,
+        -0.20102908611297607,
+        -0.10381911993026734
+      ],
+      "median_r2": -0.13837821483612062
     },
     "Cell 2 StdAE_cached": {
-      "mean_r2": -0.6942846179008484,
-      "std_r2": 0.6193769561426035,
-      "n_folds": 5
+      "mean_r2": -1.343852114677429,
+      "std_r2": 0.3783292614082111,
+      "n_folds": 5,
+      "per_seed": [
+        -0.9895478248596191,
+        -1.4045173168182372,
+        -1.3291379690170289,
+        -1.4628472566604613,
+        -1.5332102060317994
+      ],
+      "median_r2": -1.4045173168182372
     },
     "Cell 3 PCL-AE_perfold": {
-      "mean_r2": -0.7783351135253905,
-      "std_r2": 0.1350998462167865,
+      "mean_r2": -0.5397324275970459,
+      "std_r2": 0.09596435316522242,
       "per_seed": [
-        -0.6877700805664062,
-        -0.6264471530914306,
-        -0.9608677625656128,
-        -0.8658387660980225,
-        -0.7507518053054809
-      ]
+        -0.46871974468231203,
+        -0.5294628143310547,
+        -0.45628719329833983,
+        -0.6967878103256225,
+        -0.5474045753479004
+      ],
+      "median_r2": -0.5294628143310547
     },
     "Cell 4 StdAE_perfold": {
-      "mean_r2": -0.5652895021438599,
-      "std_r2": 0.06398064124034636,
+      "mean_r2": -1.257021360397339,
+      "std_r2": 1.0689056579425886,
       "per_seed": [
-        -0.5613911151885986,
-        -0.6222237825393677,
-        -0.5037453174591064,
-        -0.5013765811920166,
-        -0.63771071434021
-      ]
+        -0.8275080919265747,
+        -0.7358107805252075,
+        -0.882246994972229,
+        -0.6757514715194702,
+        -3.163789463043213
+      ],
+      "median_r2": -0.8275080919265747
     }
   },
   "contrasts": {
     "C3_minus_C4_honest_gain": {
-      "mean": -0.21304561138153072,
-      "std": 0.18948563230319287,
+      "mean": 0.7172889328002932,
+      "std": 1.0754238299892114,
+      "median": 0.3587883472442627,
       "per_seed": [
-        -0.12637896537780757,
-        -0.0042233705520628995,
-        -0.45712244510650635,
-        -0.3644621849060059,
-        -0.11304109096527093
-      ]
+        0.3587883472442627,
+        0.20634796619415285,
+        0.4259598016738892,
+        -0.0210363388061523,
+        2.616384887695313
+      ],
+      "paired_test": {
+        "mean_diff": 0.7172889328002932,
+        "n": 5,
+        "t_p": 0.2101199219627393,
+        "wilcoxon_p": 0.125
+      },
+      "paired_test_25pairs": {
+        "mean_diff": 0.7172889328002929,
+        "n": 25,
+        "t_p": 0.15998793606937275,
+        "wilcoxon_p": 0.0027848482131958008,
+        "caveat": "pairs are not independent (same substrate across seeds, same seed across substrates); sensitivity analysis only, not a substitute for a cluster bootstrap over substrates"
+      },
+      "substrate_level": {
+        "mean_diff": 0.717288932800293,
+        "n": 5,
+        "t_p": 0.2860135841707895,
+        "wilcoxon_p": 0.125,
+        "n_positive": 4,
+        "per_substrate": {
+          "Cyclohexene oxide": 0.14717693328857417,
+          "Epichlorohydrin": 3.032647299766541,
+          "Isopropyl glycidyl ether": 0.35438258647918697,
+          "Propylene oxide": 0.1400160551071167,
+          "Styrene oxide": -0.08777821063995361
+        },
+        "note": "seed-averaged, one pair per held-out substrate (the independent unit); with n=5 the smallest attainable two-sided Wilcoxon p is 0.0625"
+      }
     },
     "C1_minus_C3_PCL_AE_leakage": {
-      "mean": 1.0291525197029112,
-      "std": 0.1350998462167865,
+      "mean": 0.4036013102531434,
+      "std": 0.06557138390527484,
+      "median": 0.3759178876876831,
       "per_seed": [
-        0.938587486743927,
-        0.8772645592689514,
-        1.2116851687431336,
-        1.1166561722755433,
-        1.0015692114830017
+        0.3303415298461914,
+        0.3759178876876831,
+        0.3724029541015625,
+        0.49575872421264644,
+        0.4435854554176331
       ]
     }
-  }
+  },
+  "outlier_note": "Cell 4 (Standard-AE, per-fold) can diverge numerically for a single (seed, substrate) pair, which pulls the seed-mean; report the median next to the mean for Cell 4 and for C3-C4."
 }

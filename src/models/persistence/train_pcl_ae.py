@@ -46,7 +46,7 @@ import torch
 from sklearn.preprocessing import StandardScaler
 
 PROJECT_ROOT = Path(os.environ.get(
-    "CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition"))
+    "CO2_PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))))
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 if str(PROJECT_ROOT / "src") not in sys.path:
@@ -66,7 +66,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8
         pass
 warnings.filterwarnings("ignore")
 
-from src.config import BEST_LAMBDA_PROP, BEST_LATENT_DIM   # noqa: E402
+from src.config import BEST_LAMBDA_PROP, BEST_LATENT_DIM, PCL_AE_EPOCHS   # noqa: E402
 from utils_rxn import read_drfp                            # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -190,7 +190,7 @@ def train_and_save_pcl(X: np.ndarray, y: np.ndarray, force: bool) -> np.ndarray:
     z = train_pcl_ae(
         X, y,
         latent_dim=LATENT_DIM, lambda_prop=LAMBDA_PROP,
-        epochs=150, batch_size=128, lr=1e-3,
+        epochs=PCL_AE_EPOCHS, batch_size=128, lr=1e-3,
         pos_weight=10.0, seed=SEED,
     )
     log.info("  done in %.1fs  latent: %s", time.time() - t0, z.shape)
@@ -219,7 +219,7 @@ def train_and_save_improved_pcl(X: np.ndarray, y: np.ndarray, force: bool) -> np
     z = train_pcl_ae_improved(
         X, y,
         latent_dim=LATENT_DIM, lambda_prop=LAMBDA_PROP,
-        epochs=150, batch_size=128, lr=1e-3,
+        epochs=PCL_AE_EPOCHS, batch_size=128, lr=1e-3,
         beta=0.01,  # KL divergence weight
     )
     log.info("  done in %.1fs  latent: %s", time.time() - t0, z.shape)

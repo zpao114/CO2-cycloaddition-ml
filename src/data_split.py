@@ -7,7 +7,7 @@ co2_drfp_xtb_extended.csv          (master table after Tier 1)
 
 Outputs
 -------
-results/results_data_split/data_split.json         — consumed by 901_substrate_catalyst_matrix.py + paths_audit.py
+results/results_data_split/data_split.json         — consumed by 401/501 persistence and paths_audit.py
 results/results_data_split/data_split_summary.txt  — human-readable report
 
 NOTE: As of 2026-08-18, paths.DATA_SPLIT_JSON resolves to
@@ -29,11 +29,25 @@ Manifest byte-equality depends on the installed scikit-learn RNG. Across
 recent sklearn versions (>=1.3) the manifest is stable to within ~85%
 overlap of fold assignments; seed=2026 is canonical.
 
+Manifest v2 (row_id + data hash)
+--------------------------------
+Positional indices alone silently point at the wrong rows when upstream scripts
+(101/107/108) are re-run and the row count / order changes.  v2 additionally stores
+
+    metadata.row_ids    ordered ``row_id`` of the cleaned master table
+    metadata.data_hash  SHA-256 over (row_id, yield) of every row
+
+and every loader calls :func:`verify_manifest` / :func:`select_train_pool`, which
+raise ``ManifestMismatchError`` when the table no longer matches.  A legacy v1
+manifest (no hash) is still accepted with a warning and a row-count/bounds check.
+
 Usage
 -----
     python data_split.py             # regenerate manifest
     python data_split.py --force     # overwrite existing data_split.json
     python data_split.py --dry-run   # print splits without writing
+    python data_split.py --upgrade   # add row_ids + data_hash to an existing manifest
+                                     # (splits untouched; refuses if the table changed)
 """
 from __future__ import annotations
 
@@ -49,7 +63,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold, train_test_split
 
-PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition")
+PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 SRC_DIR = os.path.join(PROJECT_ROOT, "src")
@@ -69,6 +83,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8
     except Exception:  # pragma: no cover
         pass
 
+from eval_protocol.splits import ManifestMismatchError, fingerprint  # noqa: E402
 from src.paths import (  # noqa: E402
     DATA_SPLIT_JSON,
     DRFP_XTB_EXTENDED_CSV,
@@ -94,6 +109,28 @@ def _make_yield_strata(y: np.ndarray) -> np.ndarray:
     return out
 
 
+def clean_master_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """The exact cleaning every loader applies before positional indexing."""
+    df = df[df["extraction_status"] == "valid"].copy()
+    df = df.dropna(subset=["yield (%)"])
+    return df[df["yield (%)"] > 0].reset_index(drop=True)
+
+
+def frame_identity(df: pd.DataFrame):
+    """``(row_ids, y)`` of a *cleaned* master frame (row_id column, else content hash)."""
+    if "row_id" in df.columns:
+        ids = df["row_id"].astype(str).tolist()
+    else:  # pragma: no cover - the master CSV always carries row_id
+        from eval_protocol.splits import make_row_ids
+        ids = make_row_ids(df, ["reactant_name", "product_name", "yield (%)"]).tolist()
+    return ids, df["yield (%)"].to_numpy(dtype=float)
+
+
+def compute_data_hash(df: pd.DataFrame) -> str:
+    ids, y = frame_identity(df)
+    return fingerprint(ids, y)
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Build canonical stratified train/test manifest + 5-fold CV.",
@@ -102,6 +139,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Overwrite existing data_split.json.")
     p.add_argument("--dry-run", action="store_true",
                    help="Compute splits but do not write any output.")
+    p.add_argument("--upgrade", action="store_true",
+                   help="Add row_ids + data_hash to the existing manifest (splits untouched).")
     p.add_argument("--verbose", action="store_true", help="Enable DEBUG logging.")
     return p.parse_args(argv)
 
@@ -123,12 +162,35 @@ def main(argv=None) -> int:
         return 1
 
     df = pd.read_csv(DRFP_XTB_EXTENDED_CSV, encoding="utf-8-sig")
-    df = df[df["extraction_status"] == "valid"].copy()
-    df = df.dropna(subset=["yield (%)"])
-    df = df[df["yield (%)"] > 0].reset_index(drop=True)
+    df = clean_master_frame(df)
 
     n_total = len(df)
     log.info("%d valid rows after cleaning", n_total)
+
+    if args.upgrade:
+        if not DATA_SPLIT_JSON.exists():
+            log.error("%s not found; nothing to upgrade.", DATA_SPLIT_JSON)
+            return 1
+        with open(DATA_SPLIT_JSON, "r", encoding="utf-8") as f:
+            old = json.load(f)
+        if int(old["metadata"]["n_total"]) != n_total:
+            log.error("manifest n_total=%s but table has %d rows; refusing to upgrade "
+                      "(regenerate with --force).", old["metadata"]["n_total"], n_total)
+            return 1
+        all_idx = old["holdout"]["train_indices"] + old["holdout"]["test_indices"]
+        if sorted(all_idx) != list(range(n_total)):
+            log.error("manifest indices do not partition 0..%d; refusing to upgrade.", n_total - 1)
+            return 1
+        ids, _ = frame_identity(df)
+        old["metadata"].update({
+            "version": "2.0", "row_ids": ids, "data_hash": compute_data_hash(df),
+            "upgraded_at_utc": datetime.now(timezone.utc).isoformat(),
+        })
+        with open(DATA_SPLIT_JSON, "w", encoding="utf-8") as f:
+            json.dump(old, f, indent=2, ensure_ascii=False)
+        log.info("Upgraded %s -> v2 (data_hash=%s...)", DATA_SPLIT_JSON,
+                 old["metadata"]["data_hash"][:12])
+        return 0
 
     strata = _make_yield_strata(df["yield (%)"].values)
     train_idx, test_idx = train_test_split(
@@ -164,7 +226,9 @@ def main(argv=None) -> int:
             "n_total": int(n_total),
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "created_by": "data_split.py",
-            "version": "1.0",
+            "version": "2.0",
+            "row_ids": frame_identity(df)[0],
+            "data_hash": compute_data_hash(df),
             "description": (
                 "Canonical train/test manifest for CO2-cycloaddition ML "
                 "pipeline. Both 306_external_validation and 302/301 should "
@@ -244,6 +308,72 @@ def load_manifest(path=None):
         path = DATA_SPLIT_JSON
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+_WARNED_LEGACY = False
+
+
+def verify_manifest(df, manifest=None, *, strict=None):
+    """Check that ``df`` (the cleaned master table) is the table the manifest was cut from.
+
+    Raises :class:`ManifestMismatchError` on any mismatch (row count, row_id order,
+    data hash).  A legacy manifest without ``data_hash`` only gets a row-count and
+    index-bounds check plus a one-time warning, unless ``strict=True``.
+    Set env ``CO2_SKIP_MANIFEST_VERIFY=1`` to bypass (debugging only).
+    """
+    global _WARNED_LEGACY
+    if os.environ.get("CO2_SKIP_MANIFEST_VERIFY") == "1":
+        return True
+    if manifest is None:
+        manifest = load_manifest()
+    meta = manifest["metadata"]
+    n = len(df)
+    if int(meta["n_total"]) != n:
+        raise ManifestMismatchError(
+            f"manifest was built for {meta['n_total']} rows but the table has {n}; "
+            f"the upstream data changed - regenerate with `python src/data_split.py --force`.")
+    h = manifest["holdout"]
+    top = max(max(h["train_indices"]), max(h["test_indices"]))
+    if top >= n:
+        raise ManifestMismatchError(f"manifest index {top} out of range for {n} rows")
+    if "data_hash" not in meta:
+        if strict:
+            raise ManifestMismatchError("manifest has no data_hash (v1); run "
+                                        "`python src/data_split.py --upgrade`")
+        if not _WARNED_LEGACY:
+            log.warning("data_split.json is v1 (no row_id/data hash): only the row count was "
+                        "checked. Run `python src/data_split.py --upgrade`.")
+            _WARNED_LEGACY = True
+        return True
+    ids, _ = frame_identity(df)
+    if ids != list(meta["row_ids"]):
+        first = next((i for i, (a, b) in enumerate(zip(ids, meta["row_ids"])) if a != b), None)
+        raise ManifestMismatchError(f"row_id order differs from the manifest (first mismatch at "
+                                    f"position {first}); regenerate the manifest.")
+    got = compute_data_hash(df)
+    if got != meta["data_hash"]:
+        raise ManifestMismatchError(
+            f"data hash mismatch (manifest {meta['data_hash'][:12]}..., table {got[:12]}...): "
+            f"row ids match but yields changed; regenerate the manifest.")
+    return True
+
+
+def select_train_pool(df, manifest=None):
+    """Verify ``df`` against the manifest, then return the 85% train pool (reset index)."""
+    if manifest is None:
+        manifest = load_manifest()
+    verify_manifest(df, manifest)
+    train_idx, _, _ = holdout_arrays(manifest)
+    return df.iloc[sorted(train_idx)].reset_index(drop=True)
+
+
+def select_holdout(df, manifest=None):
+    """Verify, then return the 15% holdout rows (reset index)."""
+    if manifest is None:
+        manifest = load_manifest()
+    verify_manifest(df, manifest)
+    _, test_idx, _ = holdout_arrays(manifest)
+    return df.iloc[sorted(test_idx)].reset_index(drop=True)
 
 
 def holdout_arrays(manifest=None):

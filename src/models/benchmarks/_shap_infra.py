@@ -1,38 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-_shap_infra.py  (PERFECT v2)
-=============================
-Shared SHAP infrastructure for the CHO-sign-reversal control experiments
-(807/808/809/810 etc. in the reviewer response plan).
+_shap_infra.py
+=============
+Shared infrastructure for the CHO contrast experiments (807-810).
 
 Provides
 --------
-1. Data loading: load_X_y_groups() — loads the full training pool (2116 rows),
-   builds the (PCL-AE latent 128-D + XTB 43-D + Cond 7-D + Inter 2-D) = 180-D
-   feature matrix.  Feature column names are derived authoritatively from
-   results_best_pipeline/artifacts/feature_meta.json so the 52-D XTB+Cond+Inter
-   block is *guaranteed* to match the schema used by the PCL-AE / DualBranchANN
-   pipeline during training.
+1. load_X_y_groups(): the 85% canonical training pool as a (PCL-AE latent 128-D
+   + XTB 43-D + Cond 7-D + Inter 2-D) = 180-D matrix.  Column names come from
+   results_best_pipeline/artifacts/feature_meta.json.
 
-2. Group SHAP: compute_group_shap() — trains XGBoost on (X[~mask], y[~mask]),
-   evaluates on (X[mask], y[mask]), returns mean SHAP per feature on the test
-   set via XGBoost's native pred_contribs=True API (avoids shap-library UTF-8
-   issues on Windows).
+2. compute_group_shap(): train on X[~mask], return mean SHAP on X[mask].  XGBoost
+   early stopping uses an inner split of the TRAINING rows only.
 
-3. Bootstrap CI: bootstrap_shap_ci() — n_bootstrap iterations; each iter
-   re-samples the *test* group with replacement, then re-evaluates SHAP means.
-   The training set is held fixed (we are bootstrapping the test statistic,
-   not the training data).
+3. contrast_bootstrap(): retrain-bootstrap of D = mean(terminal SHAP) - CHO SHAP
+   for sub_homo_eV and for the whole substrate-level descriptor block.
 
-4. Permutation test: permutation_test() — shuffles y n_perm times, counts how
-   often |permuted_mean_shap| >= |observed|.  Two-tailed p-value.
-
-5. Stratified comparison: stratified_group_shap() — bins data on a condition
-   column (e.g. temperature), then computes SHAP within each stratum for CHO
-   vs. terminal substrates and reports the difference.
-
-All functions are pure / stateless — the caller manages RNG seeds via the
-``random_state`` argument.
+Caveat the analyses must respect: sub_homo_eV is constant inside each substrate
+(five values in total), so it is collinear with the other substrate-level
+descriptors and with the substrate identity itself.
 
 Design contract
 ---------------
@@ -64,7 +50,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 PROJECT_ROOT = Path(
-    os.environ.get("CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition")
+    os.environ.get("CO2_PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")))
 )
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -101,10 +87,15 @@ SUBSTRATE_ORDER = [
 CHO_NAME = "Cyclohexene oxide"
 TERMINAL_NAMES = [s for s in SUBSTRATE_ORDER if s != CHO_NAME]
 
+# Temperature column name as produced by 101/102 (U+2103 DEGREE CELSIUS).
+# Single definition for the SHAP scripts; the live feature names normally come
+# from feature_meta.json cond_cols, which holds the same string.
+TEMP_COL = "temperature (\u2103)"
+
 # Feature names of mechanistic interest (for SHAP bar plots)
 KEY_FEATURES = [
     "sub_homo_eV", "sub_lumo_eV", "sub_gap_eV", "sub_dipole_D",
-    "temperature (°)", "pressure (MPa)", "time (h)",
+    TEMP_COL, "pressure (MPa)", "time (h)",
     "activation_proxy", "charge_transfer_potential", "ion_pair_interaction",
     "electrophilicity_cat", "electrodonating_cat",
     "nucleophilicity_index", "gap_ratio", "reaction_polarity",
@@ -310,7 +301,7 @@ def load_X_y_groups(
                   the filter has detached rows from the latent alignment).
     train_pool_only : if True (default), restrict to the 85% canonical training
                   pool defined by src.data_split.holdout_arrays.  If False,
-                  use all 2490 valid rows.
+                  use all valid rows of the master table.
 
     Returns
     -------
@@ -326,8 +317,10 @@ def load_X_y_groups(
 
     # ── Restrict to canonical train pool (85%) if requested ───────────────
     if train_pool_only:
-        from src.data_split import holdout_arrays, load_manifest  # local import
-        train_idx, _, _ = holdout_arrays(load_manifest())
+        from src.data_split import holdout_arrays, load_manifest, verify_manifest  # local import
+        _manifest = load_manifest()
+        verify_manifest(df, _manifest)   # row count / row_id order / data hash
+        train_idx, _, _ = holdout_arrays(_manifest)
         # NOTE: the manifest's indices refer to position-within-cleaned-CSV
         # (i.e. df.index after reset_index in _clean_master), NOT the
         # master-CSV 'row_id' column (which has gaps from earlier dropna).
@@ -390,51 +383,58 @@ def load_X_y_groups(
     return X, y, np.asarray(groups), feat_names, df
 
 
+
 # ============================================================================
-# 3.  Group SHAP (XGBoost native pred_contribs)
+# 3.  Group SHAP
 # ============================================================================
+def inner_validation_split(n: int, val_frac: float = 0.15, seed: int = 42):
+    """Disjoint (fit_idx, val_idx) over ``range(n)`` used for early stopping."""
+    perm = np.random.RandomState(seed).permutation(n)
+    n_val = max(int(round(val_frac * n)), 8)
+    return np.sort(perm[n_val:]), np.sort(perm[:n_val])
+
+
 def compute_group_shap(
     X: np.ndarray,
     y: np.ndarray,
     group_mask: np.ndarray,
     feat_names: list[str],
-    test_frac: float = 1.0,
     n_estimators: int = 500,
     max_depth: int = 5,
     learning_rate: float = 0.05,
     random_state: int = 42,
-    verbose: bool = False,
     model_type: str = "xgb",
     rf_max_depth: int = 8,
     rf_min_samples_leaf: int = 3,
 ) -> dict:
     """
-    Train a model on (X[~mask], y[~mask]), evaluate on (X[mask], y[mask]),
-    return mean SHAP per feature.
+    Train on ``(X[~mask], y[~mask])`` and return the mean SHAP per feature on
+    the held-out rows ``X[mask]``.
 
-    ``model_type`` is ``"xgb"`` (default, uses native ``pred_contribs``) or
-    ``"rf"`` (uses ``shap.TreeExplainer``).  For RF on 180-D data the
-    KernelExplainer is intentionally not used — it crashes under
-    ``n_samples < n_features`` (see comments on ``train_rf``).
+    ``model_type`` is ``"xgb"`` (native ``pred_contribs``) or ``"rf"``
+    (``shap.TreeExplainer``; KernelExplainer is avoided because it fails when
+    n_samples < n_features).  XGBoost early stopping uses an inner validation
+    split of the TRAINING rows only, so the held-out group never influences
+    model selection.
 
-    Returns
-    -------
-    dict with keys:
-        shap_mean, shap_std, r2, n_test, feat_names, model, params
+    Returns a dict with: shap_mean, shap_std, r2, n_test.
     """
-    train_mask = ~group_mask
-    X_tr, y_tr = X[train_mask], y[train_mask]
-    X_te, y_te = X[group_mask], y[group_mask]
+    group_mask = np.asarray(group_mask)
+    if group_mask.dtype != bool:
+        raise TypeError("group_mask must be a boolean array, got %s" % group_mask.dtype)
 
+    X_tr, y_tr = X[~group_mask], y[~group_mask]
+    X_te, y_te = X[group_mask], y[group_mask]
     if len(X_tr) < 20:
         logger.warning("Train set small (%d rows); SHAP may be unreliable", len(X_tr))
     if len(X_te) < 5:
         logger.warning("Test set small (%d rows)", len(X_te))
 
+    from sklearn.metrics import r2_score
+
     if model_type == "rf":
-        from sklearn.ensemble import RandomForestRegressor
-        from sklearn.metrics import r2_score
         import shap as _shap
+        from sklearn.ensemble import RandomForestRegressor
 
         model = RandomForestRegressor(
             n_estimators=n_estimators,
@@ -442,28 +442,17 @@ def compute_group_shap(
             min_samples_leaf=rf_min_samples_leaf,
             random_state=random_state,
             n_jobs=-1,
-        )
-        model.fit(X_tr, y_tr)
-        pred_te = model.predict(X_te)
-        r2 = float(r2_score(y_te, pred_te))
-        sv = np.asarray(
-            _shap.TreeExplainer(model).shap_values(X_te),
-            dtype=np.float32,
-        )
-        if sv.ndim == 3:        # very old shap versions
-            sv = sv[..., 0]
-        shap_vals = sv
-        params = dict(
-            n_estimators=n_estimators,
-            max_depth=rf_max_depth,
-            min_samples_leaf=rf_min_samples_leaf,
-            random_state=random_state,
-        )
+        ).fit(X_tr, y_tr)
+        r2 = float(r2_score(y_te, model.predict(X_te)))
+        shap_vals = np.asarray(_shap.TreeExplainer(model).shap_values(X_te), dtype=np.float32)
+        if shap_vals.ndim == 3:        # very old shap versions return (n, n_feat, 1)
+            shap_vals = shap_vals[..., 0]
     else:
         import xgboost as xgb
-        from sklearn.metrics import r2_score
 
-        dtrain = xgb.DMatrix(X_tr, label=y_tr, feature_names=feat_names)
+        fit_idx, val_idx = inner_validation_split(len(X_tr), seed=random_state)
+        dfit = xgb.DMatrix(X_tr[fit_idx], label=y_tr[fit_idx], feature_names=feat_names)
+        dval = xgb.DMatrix(X_tr[val_idx], label=y_tr[val_idx], feature_names=feat_names)
         dtest = xgb.DMatrix(X_te, label=y_te, feature_names=feat_names)
         params = dict(
             objective="reg:squarederror",
@@ -478,259 +467,113 @@ def compute_group_shap(
             n_jobs=-1,
         )
         model = xgb.train(
-            params, dtrain,
+            params, dfit,
             num_boost_round=n_estimators,
-            evals=[(dtest, "test")],
+            evals=[(dval, "val")],
             early_stopping_rounds=50,
-            verbose_eval=verbose,
+            verbose_eval=False,
         )
-        contribs = model.predict(dtest, pred_contribs=True, validate_features=False)
-        shap_vals = contribs[:, :-1].astype(np.float32)  # drop bias column
-        pred_te = model.predict(dtest)
-        r2 = float(r2_score(y_te, pred_te))
+        best = (0, int(model.best_iteration) + 1)
+        r2 = float(r2_score(y_te, model.predict(dtest, iteration_range=best)))
+        contribs = model.predict(dtest, pred_contribs=True, validate_features=False,
+                                 iteration_range=best)
+        shap_vals = contribs[:, :-1].astype(np.float32)      # drop bias column
 
     return dict(
         shap_mean=shap_vals.mean(axis=0),
         shap_std=shap_vals.std(axis=0),
         r2=r2,
         n_test=int(len(X_te)),
-        feat_names=feat_names,
-        model=model,
-        params=params,
     )
 
 
 # ============================================================================
-# 4.  Bootstrap CI  (FIXED)
+# 4.  CHO contrast with retrain-bootstrap
 # ============================================================================
-def bootstrap_shap_ci(
-    X: np.ndarray,
-    y: np.ndarray,
-    group_mask: np.ndarray,
-    feat_names: list[str],
-    n_bootstrap: int = 1000,
-    random_state: int = 42,
-    n_estimators: int = 300,
-    model_type: str = "xgb",
-) -> pd.DataFrame:
-    """
-    Bootstrap CI for the *test* group SHAP mean.
-
-    Each iteration:
-        1. Resample the test-group rows WITH replacement.
-        2. Train XGB on (X[~group_mask], y[~group_mask]) once.
-        3. Evaluate SHAP on the bootstrap-resampled test set.
-        4. Record per-feature mean SHAP.
-
-    The training set is held fixed across bootstraps — we are characterising
-    the variability of the test statistic, not the model.  This keeps runtime
-    to O(n_bootstrap) predictions instead of O(n_bootstrap × n_total) refits.
-
-    ``model_type`` controls which estimator is used (see ``compute_group_shap``).
-
-    Returns
-    -------
-    DataFrame with columns: feat_name, shap_mean, ci_lo, ci_hi, p_zero
-    """
-    import xgboost as xgb
-    import shap as _shap
-    rng = np.random.default_rng(random_state)
-
-    n_group = int(group_mask.sum())
-    idx_group = np.where(group_mask)[0]
-
-    # Train one canonical model on the full pool (the complement is fixed).
-    canonical = compute_group_shap(
-        X, y, group_mask, feat_names,
-        n_estimators=n_estimators, random_state=random_state,
-        model_type=model_type,
-    )
-    model = canonical["model"]
-
-    # Now use that model to score bootstrap-resampled test sets.
-    shap_boot = []
-    for b in range(n_bootstrap):
-        boot_idx = rng.choice(idx_group, size=n_group, replace=True)
-        X_b = X[boot_idx]
-        if model_type == "rf":
-            sv_b = np.asarray(_shap.TreeExplainer(model).shap_values(X_b),
-                              dtype=np.float32)
-            if sv_b.ndim == 3:
-                sv_b = sv_b[..., 0]
-            shap_boot.append(sv_b.mean(axis=0))
-        else:
-            contribs_b = model.predict(
-                xgb.DMatrix(X_b, feature_names=feat_names),
-                pred_contribs=True, validate_features=False,
-            )
-            shap_boot.append(contribs_b[:, :-1].astype(np.float32).mean(axis=0))
-    shap_boot = np.asarray(shap_boot)  # (n_bootstrap, n_feat)
-
-    ci_lo = np.percentile(shap_boot, 2.5, axis=0)
-    ci_hi = np.percentile(shap_boot, 97.5, axis=0)
-    shap_mean = shap_boot.mean(axis=0)
-    p_zero = ((shap_boot < 0) != (shap_mean < 0)).mean(axis=0)
-
-    return pd.DataFrame({
-        "feat_name": feat_names,
-        "shap_mean": shap_mean,
-        "ci_lo": ci_lo,
-        "ci_hi": ci_hi,
-        "p_zero": p_zero,
-    })
-
-
-# ============================================================================
-# 5.  Permutation test
-# ============================================================================
-def permutation_test(
-    X: np.ndarray,
-    y: np.ndarray,
-    group_mask: np.ndarray,
-    feat_names: list[str],
-    feature_of_interest: str,
-    n_perm: int = 1000,
-    random_state: int = 42,
-    n_estimators: int = 300,
-    groups: np.ndarray | None = None,
-    model_type: str = "xgb",
-) -> dict:
-    """
-    Permutation test for the SHAP value of ``feature_of_interest`` in the
-    left-out group.
-
-    Null hypothesis: the SHAP magnitude is the same when the group label of
-    each row is randomly permuted.  We *do not* shuffle ``y`` (that destroys
-    all signal and makes the test uninformative); we shuffle the *group
-    membership* and refit.  This is the natural LOCO-style null.
-
-    Parameters
-    ----------
-    groups : array-like of str (length n_rows)
-        Group label for each row.  Required.
-    model_type : ``"xgb"`` (default) or ``"rf"``.
-    rf_n_estimators : int
-        Number of trees to use for RF permutation.  Default 100; this is
-        plenty for a null distribution on 180-D / 2k rows.  Steady-state
-        cost is ~0.6 s / iter.
-
-    Returns
-    -------
-    dict with keys: observed, perm_means, p_value, significant, feature, n_perm
-    """
-    if groups is None:
-        raise ValueError("groups must be provided for permutation_test")
+def substrate_level_cols(X: np.ndarray, groups: np.ndarray) -> list[int]:
+    """Columns that are constant inside every substrate but differ across
+    substrates (sub_homo_eV, sub_lumo_eV, ...).  With only five substrates
+    these columns are mutually collinear, so SHAP is split between them
+    arbitrarily; their sum is the identifiable quantity."""
     groups = np.asarray(groups)
-    rng = np.random.default_rng(random_state)
-    feat_idx = feat_names.index(feature_of_interest) if feature_of_interest in feat_names else 0
-
-    # Observed
-    result = compute_group_shap(
-        X, y, group_mask, feat_names,
-        n_estimators=n_estimators, random_state=random_state,
-        model_type=model_type,
-    )
-    observed = float(result["shap_mean"][feat_idx])
-
-    # Permutations: shuffle group membership, refit, record mean SHAP
-    perm_means = []
-    for p in range(n_perm):
-        chosen_idx = rng.choice(len(groups), size=int(group_mask.sum()), replace=False)
-        perm_mask = np.zeros(len(groups), dtype=bool)
-        perm_mask[chosen_idx] = True
-        res = compute_group_shap(
-            X, y, perm_mask, feat_names,
-            n_estimators=n_estimators if model_type == "xgb" else 100,
-            random_state=random_state + p + 1,
-            model_type=model_type,
-        )
-        perm_means.append(float(res["shap_mean"][feat_idx]))
-
-    perm_means = np.asarray(perm_means)
-    # One-sided "is observed more extreme than null?": use |.|
-    p_val = float(np.mean(np.abs(perm_means) >= np.abs(observed)))
-
-    return dict(
-        observed=observed,
-        perm_means=perm_means,
-        p_value=p_val,
-        significant=p_val < 0.05,
-        feature=feature_of_interest,
-        n_perm=n_perm,
-    )
+    masks = [groups == s for s in sorted(set(groups))]
+    cols = []
+    for j in range(X.shape[1]):
+        firsts = []
+        for m in masks:
+            c = X[m, j]
+            if c.min() != c.max():
+                break
+            firsts.append(c[0])
+        else:
+            if len(set(firsts)) > 1:
+                cols.append(j)
+    return cols
 
 
-# ============================================================================
-# 6.  Stratified comparison (condition control)
-# ============================================================================
-def stratified_group_shap(
+def contrast_bootstrap(
     X: np.ndarray,
     y: np.ndarray,
     groups: np.ndarray,
     feat_names: list[str],
-    cho_name: str = CHO_NAME,
-    stratify_col: str = "temperature (°)",
-    n_bins: int = 3,
-    min_per_stratum: int = 10,
+    model_type: str = "xgb",
+    n_boot: int = 200,
+    n_estimators: int = 500,
+    seed: int = 0,
+    focus: str = "sub_homo_eV",
 ) -> pd.DataFrame:
     """
-    Compare CHO vs terminal SHAP within matched strata defined by
-    ``stratify_col`` (e.g. temperature bins).
+    Retrain-bootstrap for the CHO contrast.
+
+    Each iteration resamples the TRAINING rows (with replacement) of every
+    leave-one-substrate-out split, refits, and records the mean SHAP of
+    ``focus`` and of the whole substrate-level descriptor block on the held-out
+    substrate.  Per iteration:
+
+        D = mean over terminal substrates of SHAP  -  SHAP of CHO
+
+    so the interval reflects training-set and model variability (the held-out
+    rows are never resampled: the feature is constant inside a substrate).
+
+    Returns one row per iteration with: cho_homo, term_homo, D_homo,
+    cho_block, term_block, D_block.
     """
-    if stratify_col not in feat_names:
-        logger.warning("stratify_col '%s' not in features; skipping", stratify_col)
-        return pd.DataFrame()
-
-    col_idx = feat_names.index(stratify_col)
-    vals = X[:, col_idx]
-
-    try:
-        bins = np.percentile(vals, np.linspace(0, 100, n_bins + 1))
-    except Exception:
-        bins = np.linspace(vals.min(), vals.max(), n_bins + 1)
-    bins[0] = -np.inf
-    bins[-1] = np.inf
+    groups = np.asarray(groups)
+    block = substrate_level_cols(X, groups)
+    fi = feat_names.index(focus)
+    rng = np.random.default_rng(seed)
 
     rows = []
-    for i in range(n_bins):
-        mask = (vals >= bins[i]) & (vals < bins[i + 1])
-        if not mask.any():
-            continue
-        X_s, y_s, g_s = X[mask], y[mask], groups[mask]
-        cho_mask_s = np.array([g == cho_name for g in g_s])
-        term_mask_s = ~cho_mask_s
-
-        if cho_mask_s.sum() < min_per_stratum or term_mask_s.sum() < min_per_stratum:
-            continue
-
-        res_cho = compute_group_shap(X_s, y_s, cho_mask_s, feat_names, random_state=42)
-        res_term = compute_group_shap(X_s, y_s, term_mask_s, feat_names, random_state=42)
-
-        try:
-            si = feat_names.index("sub_homo_eV")
-        except ValueError:
-            si = 0
-
+    for b in range(n_boot):
+        homo, blk = {}, {}
+        for s in SUBSTRATE_ORDER:
+            te = groups == s
+            tr_idx = np.flatnonzero(~te)
+            bi = rng.choice(tr_idx, size=len(tr_idx), replace=True)
+            Xb = np.vstack([X[bi], X[te]])
+            yb = np.concatenate([y[bi], y[te]])
+            mask = np.r_[np.zeros(len(bi), bool), np.ones(int(te.sum()), bool)]
+            sm = compute_group_shap(
+                Xb, yb, mask, feat_names, n_estimators=n_estimators,
+                random_state=seed * 10_000 + b, model_type=model_type,
+            )["shap_mean"]
+            homo[s], blk[s] = float(sm[fi]), float(sm[block].sum())
+        th = float(np.mean([homo[s] for s in TERMINAL_NAMES]))
+        tb = float(np.mean([blk[s] for s in TERMINAL_NAMES]))
         rows.append(dict(
-            stratum=f"[{bins[i]:.1f}, {bins[i+1]:.1f})",
-            cho_n=int(cho_mask_s.sum()),
-            term_n=int(term_mask_s.sum()),
-            cho_shap_mean=float(res_cho["shap_mean"][si]),
-            term_shap_mean=float(res_term["shap_mean"][si]),
-            shap_diff=float(res_cho["shap_mean"][si] - res_term["shap_mean"][si]),
+            cho_homo=homo[CHO_NAME], term_homo=th, D_homo=th - homo[CHO_NAME],
+            cho_block=blk[CHO_NAME], term_block=tb, D_block=tb - blk[CHO_NAME],
         ))
-
+        if (b + 1) % 25 == 0:
+            logger.info("    [%s] bootstrap %d/%d", model_type, b + 1, n_boot)
     return pd.DataFrame(rows)
 
 
 # ============================================================================
-# 7.  Export helpers
+# 5.  Shared helpers
 # ============================================================================
-def shap_to_csv(result: dict, path: str | Path):
-    df = pd.DataFrame({
-        "feat_name": result["feat_names"],
-        "shap_mean": result["shap_mean"],
-        "shap_std": result["shap_std"],
-    })
-    df.to_csv(path, index=False)
-    logger.info("Saved SHAP CSV: %s", path)
+MIN_N_RELIABLE = 30     # held-out groups smaller than this are not reported
+
+
+def short_label(s: str) -> str:
+    return s.replace(" oxide", "").replace("Isopropyl glycidyl ether", "IGE")

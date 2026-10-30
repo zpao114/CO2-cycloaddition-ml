@@ -110,7 +110,7 @@ RESULTS_PCL_AE_VIZ              = PROJECT_ROOT / "results_pcl_ae_viz"
 # Improved PCL-AE results (VAE-style, Huber Loss) - new in 2026-08-21
 IMPROVED_PCL_AE_LATENT_NPY      = RESULTS_PCL_AE / "improved_pcl_ae_latent.npy"
 RESULTS_STEP4                   = PROJECT_ROOT / "results_step4"
-RESULTS_STEP4_5                 = PROJECT_ROOT / "results_step4_5"
+RESULTS_STEP4_5                 = PROJECT_ROOT / "results_step4_5_v2"
 RESULTS_STEP5                   = PROJECT_ROOT / "results_step5"
 RESULTS_STEP7_IMPROVED_LOSO     = PROJECT_ROOT / "results_step7_improved_loso"
 RESULTS_SI                      = RESULTS_DIR / "results_si"

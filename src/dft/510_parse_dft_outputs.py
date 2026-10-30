@@ -5,7 +5,7 @@
 ========================
 Parse ORCA 6.1 output files (.out) from the DFT validation set and write:
   1. <name>.xyz.out               — final optimized geometry (XYZ frame)
-  2. dft_results_summary.csv      — one row per molecule with HOMO/LUMO/gap/dipole
+  2. results/dft_results_summary.csv — one row per molecule with HOMO/LUMO/gap/dipole
 
 Used by:
   - 512_xtb_on_dft_geometry.py  (reads <name>.xyz.out for apples-to-apples xTB)
@@ -32,7 +32,7 @@ import csv
 import os
 import re
 import sys
-from typing import Dict, List, Optional, Tuple, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 # ----------------------------------------------------------------------------
@@ -51,6 +51,13 @@ NAME_METADATA: Dict[str, Dict[str, str]] = {
     "epichlorohydrin":             {"smiles": "ClCC1CO1",           "role": "substrate",            "category": "Epichlorohydrin"},
     "propylene_oxide":             {"smiles": "CC1CO1",             "role": "substrate",            "category": "Propylene-oxide"},
     "isopropyl_glycidyl_ether":    {"smiles": "CC(C)OCC1CO1",       "role": "substrate",            "category": "Glycidyl ether"},
+    # Added for the CHO re-computation / extended substrate set.  SMILES were
+    # derived from the optimised <name>.xyz.out geometries (RDKit
+    # rdDetermineBonds) and cross-checked against the chem registry.
+    "cyclohexene_oxide":           {"smiles": "C1CCC2OC2C1",        "role": "substrate",            "category": "Cyclohexene oxide"},
+    "allyl_glycidyl_ether":        {"smiles": "C=CCOCC1CO1",        "role": "substrate",            "category": "Glycidyl ether"},
+    "furfuryl_glycidyl_ether":     {"smiles": "c1coc(COCC2CO2)c1",  "role": "substrate",            "category": "Glycidyl ether"},
+    "phenyl_glycidyl_ether":       {"smiles": "c1ccc(OCC2CO2)cc1",  "role": "substrate",            "category": "Glycidyl ether"},
     # catalysts
     "TBAI":                        {"smiles": "CCCC[N+](CCCC)(CCCC)CCCC.[I-]", "role": "catalyst_ionic_liquid", "category": "Ionic liquid"},
     "ZnBr2":                       {"smiles": "[Br-].[Zn+2].[Br-]", "role": "catalyst_metal_halide", "category": "Metal halide"},
@@ -93,7 +100,7 @@ RE_LUMO = re.compile(
     r"^\s*LUMO\s*:\s*(-?\d+\.\d+)\s*Eh", re.IGNORECASE | re.MULTILINE
 )
 RE_DIPOLE = re.compile(
-    r"Total Dipole Moment\s*:\s*(-?\d+\.\d+)", re.IGNORECASE
+    r"Magnitude \(Debye\)\s*:\s*(-?\d+\.\d+)", re.IGNORECASE
 )
 RE_FINAL_E = re.compile(
     r"FINAL SINGLE POINT ENERGY\s*[:=]?\s*(-?\d+\.\d+)", re.IGNORECASE
@@ -101,7 +108,7 @@ RE_FINAL_E = re.compile(
 # ORCA 6.1 prints "*** OPTIMIZATION RUN DONE ***" on success
 # and                                          "*** OPTIMIZATION FAILED ***" on failure.
 RE_CONVERGED = re.compile(
-    r"\*\*\*\s*OPTIMIZATION\s+(RUN\s+DONE|FAILED)\s*\*\*\*", re.IGNORECASE
+    r"\*\*\*\s*OPTIMIZATION\s+RUN\s+DONE\s*\*\*\*", re.IGNORECASE
 )
 # ORCA 5.0/4.x used "THE OPTIMIZATION HAS CONVERGED" instead.
 RE_CONVERGED_OLD = re.compile(
@@ -157,9 +164,11 @@ def _parse_homo_lumo_table(text: str) -> Tuple[Optional[float], Optional[float]]
 
     Returns (homo_eh, lumo_eh).  Values are None if parsing fails.
     """
-    block_match = _RE_ORBITAL_TABLE.search(text)
-    if not block_match:
+    # Opt Freq jobs print one table per SCF; the LAST one is at the converged geometry.
+    block_matches = list(_RE_ORBITAL_TABLE.finditer(text))
+    if not block_matches:
         return None, None
+    block_match = block_matches[-1]
 
     homo_eh = None
     lumo_eh = None
@@ -228,10 +237,13 @@ def parse_orca_out(path: str) -> Dict[str, Optional[object]]:
     gap_eV = (lumo_eV - homo_eV) if (homo_eV is not None and lumo_eV is not None) else None
 
     # Dipole moment  (already in Debye in ORCA output)
-    dipole_d = _safe_float((RE_DIPOLE.search(text) or [None, None])[1])
+    # (|mu| from the "Magnitude (Debye)" line; last occurrence = converged geometry)
+    dip = RE_DIPOLE.findall(text)
+    dipole_d = _safe_float(dip[-1]) if dip else None
 
-    # Final electronic energy (single-point, Eh)
-    final_e = _safe_float((RE_FINAL_E.search(text) or [None, None])[1])
+    # Final electronic energy (single-point, Eh) at the converged geometry
+    fe = RE_FINAL_E.findall(text)
+    final_e = _safe_float(fe[-1]) if fe else None
 
     # Convergence
     converged = bool(RE_CONVERGED.search(text) or RE_CONVERGED_OLD.search(text))
@@ -294,6 +306,54 @@ def discover_out_files(work_dir: str) -> List[str]:
     )
 
 
+def _skeleton_smiles(mol) -> str:
+    """Canonical SMILES of the bond graph only (orders/charges/stereo erased)."""
+    from rdkit import Chem
+    rw = Chem.RWMol(mol)
+    for a in rw.GetAtoms():
+        a.SetFormalCharge(0)
+        a.SetNoImplicit(False)
+        a.SetNumExplicitHs(0)
+        a.SetIsAromatic(False)
+        a.SetChiralTag(Chem.ChiralType.CHI_UNSPECIFIED)
+    for b in rw.GetBonds():
+        b.SetBondType(Chem.BondType.SINGLE)
+        b.SetIsAromatic(False)
+        b.SetStereo(Chem.BondStereo.STEREONONE)
+    m = rw.GetMol()
+    Chem.SanitizeMol(m, Chem.SanitizeFlags.SANITIZE_NONE)
+    return Chem.MolToSmiles(m, canonical=True)
+
+
+def check_geometry_vs_smiles(xyz_text: Optional[str], smiles: str) -> Optional[bool]:
+    """Compare the bond graph perceived from the optimised geometry to ``smiles``.
+
+    Returns True / False, or None when the check is not applicable (RDKit
+    missing, no geometry, no SMILES, multi-fragment/ionic SMILES, or
+    connectivity perception failed).  Only the heavy-atom connectivity is
+    compared, so charge-separated forms (e.g. DMSO) do not cause false alarms.
+    """
+    if not xyz_text or not smiles or "." in smiles:
+        return None
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import rdDetermineBonds
+    except ImportError:
+        return None
+    try:
+        geom = Chem.MolFromXYZBlock(xyz_text)
+        if geom is None:
+            return None
+        rdDetermineBonds.DetermineConnectivity(geom)
+        ref = Chem.MolFromSmiles(smiles)
+        if ref is None:
+            return None
+        return _skeleton_smiles(Chem.RemoveHs(geom, sanitize=False)) == \
+            _skeleton_smiles(ref)
+    except Exception:
+        return None
+
+
 def process_one(work_dir: str, basename: str) -> Dict[str, object]:
     """Parse one .out file and write its .xyz.out.  Return the summary row."""
     out_path = os.path.join(work_dir, basename)
@@ -301,6 +361,15 @@ def process_one(work_dir: str, basename: str) -> Dict[str, object]:
 
     name = basename[:-len(".out")]  # strip ".out"
     meta = NAME_METADATA.get(name, {})
+    if not meta:
+        print(f"  [warn] {name}: not in NAME_METADATA -> smiles/role/category left blank",
+              file=sys.stderr)
+    else:
+        ok = check_geometry_vs_smiles(parsed["geometry_xyz"], meta.get("smiles", ""))
+        if ok is False:
+            print(f"  [warn] {name}: geometry connectivity does NOT match "
+                  f"metadata SMILES {meta['smiles']!r} -- check the ORCA input",
+                  file=sys.stderr)
 
     # Write geometry sidecar for 512
     if parsed["geometry_xyz"]:
@@ -336,11 +405,12 @@ def main() -> None:
                         help="Directory containing the ORCA <name>.out files.")
     parser.add_argument("--out", default=None,
                         help="Output CSV path.  Defaults to "
-                             "<work-dir>/dft_results_summary.csv.")
+                             "<work-dir>/results/dft_results_summary.csv "
+                             "(the location 514 / 602 / orchestrator read).")
     args = parser.parse_args()
 
     work_dir = os.path.abspath(args.work_dir)
-    out_csv = args.out or os.path.join(work_dir, "dft_results_summary.csv")
+    out_csv = args.out or os.path.join(work_dir, "results", "dft_results_summary.csv")
 
     if not os.path.isdir(work_dir):
         print(f"[error] work-dir not found: {work_dir}", file=sys.stderr)

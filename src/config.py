@@ -20,7 +20,7 @@ import warnings
 
 # Project root resolution (matches utils_rxn.PROJECT_ROOT).
 PROJECT_ROOT = os.environ.get(
-    "CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition"
+    "CO2_PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 )
 _RESULTS = os.path.join(PROJECT_ROOT, "results_lambda_ablation",
                         "lambda_results.csv")
@@ -33,16 +33,20 @@ def _load_best_lambda_prop():
     Read BEST_LAMBDA_PROP from results_lambda_ablation/lambda_results.csv.
 
     Picks the λ whose DualANN R² is maximal (column ann_r2_mean).
-    Falls back to 200.0 with a warning if the CSV is missing.
+
+    There is deliberately NO numeric fallback.  If the CSV is missing or unreadable the
+    function returns ``(None, None)``: a made-up λ would silently run the whole B/G chain
+    with the wrong property weight.  ``BEST_LAMBDA_PROP is None`` then makes every
+    consumer fail loudly (``float(None)`` / ``require_best_lambda()``).  Import itself must
+    not raise, because 201 stage 1 imports this module before stage 2 has produced the CSV.
     """
-    fallback = 200.0
     if not os.path.isfile(_RESULTS):
         warnings.warn(
-            f"[config] {_RESULTS} not found.  Using fallback "
-            f"BEST_LAMBDA_PROP={fallback}.  Run 201_ablation.py to refresh.",
+            f"[config] {_RESULTS} not found; BEST_LAMBDA_PROP=None.  "
+            f"Run 201_ablation.py --stage 2 first.",
             stacklevel=2,
         )
-        return fallback
+        return None, None
 
     try:
         import csv
@@ -55,11 +59,10 @@ def _load_best_lambda_prop():
             ]
         if not rows:
             warnings.warn(
-                f"[config] {_RESULTS} has no parseable rows.  "
-                f"Using fallback BEST_LAMBDA_PROP={fallback}.",
+                f"[config] {_RESULTS} has no parseable rows; BEST_LAMBDA_PROP=None.",
                 stacklevel=2,
             )
-            return fallback
+            return None, None
 
         # Pick λ with the largest ann_r2_mean (DualANN is the primary model
         # in 201_ablation.py Stage 2; criterion matches line 530).
@@ -69,21 +72,24 @@ def _load_best_lambda_prop():
         return best_lam, best_r2
     except Exception as e:
         warnings.warn(
-            f"[config] failed to read {_RESULTS}: {e}.  "
-            f"Using fallback BEST_LAMBDA_PROP={fallback}.",
+            f"[config] failed to read {_RESULTS}: {e}; BEST_LAMBDA_PROP=None.",
             stacklevel=2,
         )
-        return fallback
+        return None, None
 
 
 # Best λ for property-co-learning (auto-loaded from lambda_results.csv).
-# Tuple: (best_lambda, best_ann_r2) — both available to downstream scripts.
-_LAMBDA_RESULT = _load_best_lambda_prop()
-if isinstance(_LAMBDA_RESULT, tuple):
-    BEST_LAMBDA_PROP, BEST_LAMBDA_PROP_R2 = _LAMBDA_RESULT
-else:
-    BEST_LAMBDA_PROP = _LAMBDA_RESULT
-    BEST_LAMBDA_PROP_R2 = None
+# (best_lambda, best_ann_r2); both are None when the sweep has not been run.
+BEST_LAMBDA_PROP, BEST_LAMBDA_PROP_R2 = _load_best_lambda_prop()
+
+
+def require_best_lambda() -> float:
+    """Return BEST_LAMBDA_PROP or raise a clear error when the λ sweep has not been run."""
+    if BEST_LAMBDA_PROP is None:
+        raise RuntimeError(
+            "BEST_LAMBDA_PROP is undefined: results_lambda_ablation/lambda_results.csv is "
+            "missing or unreadable. Run `python src/data/201_ablation.py --stage 2` first.")
+    return float(BEST_LAMBDA_PROP)
 
 
 def _load_best_drfp_variant():
@@ -119,6 +125,11 @@ def _load_best_drfp_variant():
 # Latent dimension for PCL-AE (used by 05, 09, 10, 13).  This is a structural
 # choice, not a tuned hyper-parameter, so it stays hard-coded.
 BEST_LATENT_DIM = 128
+
+# Training budget of every PCL-AE / label-free AE in the frozen-vs-retrain comparison.
+# The frozen (cached, full-data) arm and the per-fold retrained arm must use the same
+# value, otherwise Delta_protocol absorbs an optimisation-budget difference.
+PCL_AE_EPOCHS = 150
 
 # DRFP variant (auto-loaded from drfp_ablation_meta.json).
 BEST_DRFP_VARIANT = _load_best_drfp_variant()

@@ -23,21 +23,35 @@ Encoding
 The raw CSV is encoded in GBK / GB2312 / GB18030. The loader tries each of
 these in order, falling back to UTF-8, then Latin-1.
 
-Important bug-preservation note
--------------------------------
-This script intentionally preserves two known bug sites (the journal/procedure
-patterns that are *compiled but never applied* — see ``extract_catalysts``).
-The bug is preserved because reverting it would change the ``valid`` row
-count and break downstream benchmarks. Re-enable them only via a dedicated
-``--purge-bug`` flag (currently a no-op).
+Extraction rule: a row is kept if ALL critical info is PRESENT
+----------------------------------------------------------------
+Both pure Reaxys records ('With A, B in S, Time=...') and prose-led rows with
+a reagent-style 'With...' tail are parsed.  A row is kept only when ALL of the
+following hold, otherwise it is discarded:
+
+  * the substrate is one of the supported epoxides;
+  * the yield is a usable number (exact, approximate 'Ca.', bound '> 99 %', or
+    midpoint of a range 'a - b %'; no masses or text-only entries);
+  * every reagent equals a CAT_NORMALIZE key AND that key has an exact structure
+    in chem_registry.py (matching is whole-token, so polymer/silica/MOF-
+    supported catalysts never collapse to a known substring like 'pyridine');
+  * the solvent clause is fully resolved;
+  * Time / T / p: any of the three missing is fine (Reaxys gaps), but present
+    ones must be single numbers with units (ranges and stages are rejected);
+  * heating is conventional (no light, microwave, electrolysis, flow).
+
+Rows that start with free procedure prose pass when their tail-only parse
+succeeds (the tail lists what went into the flask).
+Duplicates are kept once: rows with identical Reaction/Yield/Conditions, and
+rows whose parsed output record is identical in every column.
+Rows rejected only because one short, plain reagent name is unknown go to
+extraction_report.csv; all others go to discard_report.csv.
 
 Usage
 -----
     python 101_clean.py
     python 101_clean.py --force                 # ignore existing cleaned.csv
     python 101_clean.py --input <other.csv>     # custom input
-    python 101_clean.py --purge-bug             # re-enable the suppressed
-                                                 #   journal/procedure strips
 """
 
 from __future__ import annotations
@@ -50,14 +64,14 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-# ── Paths (use centralised registry) ──────────────────────────────────────
-_PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition")
+_PROJECT_ROOT = os.environ.get("CO2_PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 try:
@@ -71,8 +85,7 @@ try:
         ensure_dir,
     )
 except Exception:  # noqa: BLE001
-    # Fallback when src/ is not on PYTHONPATH
-    _ROOT = Path(os.environ.get("CO2_PROJECT_ROOT", r"D:\machine-learning\CO2-cycloaddition"))
+    _ROOT = Path(os.environ.get("CO2_PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))))
     RAW_REAXYS_CSV = _ROOT / "data" / "raw" / "CO2_cycloaddition_merged.csv"
     CLEANED_CSV   = _ROOT / "data" / "processed" / "cleaned.csv"
     EXTRACTION_REPORT = _ROOT / "data" / "external" / "extraction_report.csv"
@@ -81,16 +94,13 @@ except Exception:  # noqa: BLE001
     DATA_EXTERNAL     = _ROOT / "data" / "external"
     def ensure_dir(p): Path(p).mkdir(parents=True, exist_ok=True); return Path(p)
 
-# ── Encoding handling ─────────────────────────────────────────────────────
 INPUT_ENCODINGS = ("gbk", "gb2312", "gb18030", "utf-8", "latin-1")
 
-# ── Logging ────────────────────────────────────────────────────────────────
 LOG_FMT = "%(asctime)s [%(levelname)s] %(message)s"
 LOG_DATEFMT = "%H:%M:%S"
 logger = logging.getLogger("101_clean")
 
 
-# ── Substrate / product mapping ────────────────────────────────────────────
 # Garbled variants preserved here because the raw CSV contains Unicode
 # hyphen/dash characters that get corrupted to '?' during Excel→CSV export.
 SUBSTRATE_MAP = {
@@ -111,7 +121,6 @@ SUBSTRATE_MAP = {
 }
 
 
-# ── Blacklist patterns ────────────────────────────────────────────────────
 # NOTE: photo/LED patterns must use word boundaries, otherwise matching
 # "placed" / "flocculated" / "Led (author name)" causes false positives.
 CAT_BLACKLIST_PATTERNS = [
@@ -137,10 +146,7 @@ CAT_BLACKLIST_PATTERNS = [
 ]
 
 
-# ── Catalyst normalization dictionary ─────────────────────────────────────
-# 250+ entries: TBAB / TBAI / TBAC, all IL cation/anion variants, metal
-# halides, organic bases, and legacy English abbreviations. Extending this
-# table is the canonical way to capture new literature mentions.
+# Extending this table is the canonical way to capture new literature mentions.
 CAT_NORMALIZE: Dict[str, str] = {
     "tetrabutylammonium bromide":        "tetrabutylammonium bromide",
     "tetrabutylammomium bromide":       "tetrabutylammonium bromide",
@@ -149,9 +155,11 @@ CAT_NORMALIZE: Dict[str, str] = {
     "tetrabutylammonium fluoride":        "tetrabutylammonium fluoride",
     "tetrabutylammonium hydroxide":       "tetrabutylammonium hydroxide",
     "TBAB":                             "tetrabutylammonium bromide",
-    "TBAI":                             "tetrabutylammonium iodide",
+    "TBAC":                             "tetrabutylammonium chloride",
+    "TBAF":                             "tetrabutylammonium fluoride",
+    "TBAI":                             "tetra-(n-butyl)ammonium iodide",
     "n-Bu4NBr":                        "tetrabutylammonium bromide",
-    "n-Bu4NI":                         "tetrabutylammonium iodide",
+    "n-Bu4NI":                         "tetra-(n-butyl)ammonium iodide",
     "tetra-n-propylammonium bromide":      "tetra-n-propylammonium bromide",
     "tetraoctyl ammonium bromide":       "tetraoctyl ammonium bromide",
     "tetrahexylammonium bromide":        "tetrahexylammonium bromide",
@@ -217,7 +225,7 @@ CAT_NORMALIZE: Dict[str, str] = {
     "tetraphenylphosphonium bromide": "tetraphenylphosphonium bromide",
     "tetraphenylphosphonium":        "tetraphenylphosphonium",
     "triphenylphosphine":            "triphenylphosphine",
-    "DBU":                          "DBU",
+    "DBU":                          "1,8-diazabicyclo[5.4.0]undec-7-ene",
     "DMAP":                         "DMAP",
     "DABCO":                        "DABCO",
     "1,4-diazabicyclo[2.2.2]octane": "1,4-diazabicyclo[2.2.2]octane",
@@ -273,7 +281,6 @@ CAT_NORMALIZE: Dict[str, str] = {
     "tetra-n-propylammonium bromide":       "tetra-n-propylammonium bromide",
     "tri-n-butylamine":                    "tri-n-butylamine",
     "tributylamine":                       "tri-n-butylamine",
-    # Imidazolium / pyridinium / pyrrolidinium / piperidinium variants
     "1-n-butyl-3-methylimidazolim bromide": "1-butyl-3-methylimidazolium bromide",
     "1-n-butyl-3-methylimidazolium bromide": "1-butyl-3-methylimidazolium bromide",
     "1-butyl-3-methylimidazolium alanine": "1-butyl-3-methylimidazolium alanine",
@@ -294,7 +301,6 @@ CAT_NORMALIZE: Dict[str, str] = {
     "imidazolium": "imidazolium",
     "imidazolium alanine": "imidazolium alanine",
     "tetraphenylstibonium bromide": "tetraphenylstibonium bromide",
-    # Zinc / cobalt / other metal complexes
     "zinc(II)-1,10-phenanthroline-5,6-dione": "zinc phenanthroline dione",
     "zinc(II)-1,10-phenanthroline-5,6-dione-": "zinc phenanthroline dione",
     "zinc phenanthroline dione": "zinc phenanthroline dione",
@@ -313,14 +319,12 @@ CAT_NORMALIZE: Dict[str, str] = {
     "cobalt-impregnated 2D-": "cobalt-impregnated 2D material",
     "bromopentacarbonylrhenium": "bromopentacarbonylrhenium",
     "polyethylene glycol-supported hexaalkylguanidinium bromide": "polyethylene glycol-supported hexaalkylguanidinium bromide",
-    # Salen family
     "R,R-Jacobsen's Co-I salen catalyst": "Jacobsen Co-salen",
     "Jacobsen Co-salen": "Jacobsen Co-salen",
     "salen cobalt": "Jacobsen Co-salen",
     "salen": "salen",
     "Al{C5H2O(O)(O)CH2OH}3": "Al-salan complex",
     "aluminum salen": "aluminum salen",
-    # Reagents / phase-transfer additives
     "(triphenylphosphoranylidene)acetaldehyde": "(triphenylphosphoranylidene)acetaldehyde",
     "triphenylphosphoranylideneacetaldehyde": "(triphenylphosphoranylidene)acetaldehyde",
     "N-bromosuccinimide": "N-bromosuccinimide",
@@ -328,7 +332,6 @@ CAT_NORMALIZE: Dict[str, str] = {
     "dibenzoyl peroxide": "dibenzoyl peroxide",
     "dibenzoyl peroxide; N-bromosuccinimide": "dibenzoyl peroxide; N-bromosuccinimide",
     "2,5-dihydroxyterephthalohydrazide": "2,5-dihydroxyterephthalohydrazide",
-    # Crown ether / amino-acid / pyridinium variants
     "18-crown-6 ether": "18-crown-6 ether",
     "18-crown-6": "18-crown-6 ether",
     "crown ether": "18-crown-6 ether",
@@ -338,10 +341,55 @@ CAT_NORMALIZE: Dict[str, str] = {
     "N-trimethylethan-1-aminium iodide": "N-trimethylethan-1-aminium iodide",
     "4-dimethylaminopyridine": "4-dimethylaminopyridine",
     "4-dimethylamino-N-iodopyridinium bromide": "4-dimethylamino-N-iodopyridinium bromide",
+    # Spellings found in the raw Conditions text (verified row by row)
+    "TBABr":                              "tetrabutylammonium bromide",
+    "tetrabutylammoniumbromide":          "tetrabutylammonium bromide",
+    "tetrabutylammoniumchloride":         "tetrabutylammonium chloride",
+    "tetra-n-tertbutylammonium bromide":  "tetrabutylammonium bromide",
+    # Discrete, fully specified compounds that occur as stated reagents in the
+    # raw records (each has an exact structure in chem_registry.py).
+    "water":                              "water",
+    "calcium iodide":                     "calcium iodide",
+    "zinc(II) chloride":                  "zinc chloride",
+    "zinc(II) iodide":                    "zinc iodide",
+    "potassium bromide":                  "potassium bromide",
+    "indium(III) bromide":                "indium(III) bromide",
+    "chromium dichloride":                "chromium dichloride",
+    "choline chloride":                   "choline chloride",
+    "tetrabutylphosphonium bromide":      "tetrabutylphosphonium bromide",
+    "tetrabutyl phosphonium bromide":     "tetrabutylphosphonium bromide",
+    "tetrabutyl ammonium fluoride":       "tetrabutylammonium fluoride",
+    "tetrabutyl ammonium bromide":        "tetrabutylammonium bromide",
+    "1,1,3,3-tetramethylguanidine hydrobromide": "1,1,3,3-tetramethylguanidine hydrobromide",
+    "MTBD":                               "MTBD",
+    "TBD":                                "TBD",
+    "biphenyl":                           "biphenyl",
+    "benzyl bromide":                     "benzyl bromide",
+    "phenol":                             "phenol",
+    "4-methoxy-phenol":                   "4-methoxyphenol",
+    "4-methoxyphenol":                    "4-methoxyphenol",
+    "3-(aminomethyl)phenol":              "3-(aminomethyl)phenol",
+    "2-Hydroxymethylpyridine":            "2-pyridinemethanol",
+    "2-Picolinic acid":                   "picolinic acid",
+    "3-Dimethylamino-1-propanol":         "3-dimethylamino-1-propanol",
+    "acetic acid":                        "acetic acid",
+    "formic acid":                        "formic acid",
+    "glycerol":                           "glycerol",
+    "Pentaerythritol":                    "pentaerythritol",
+    "betaine":                            "betaine",
+    "L-histidine":                        "L-histidine",
+    "L-phenylalanine":                    "L-phenylalanine",
+    "tris(4-bromophenyl)amine":           "tris(4-bromophenyl)amine",
+    "1,2,4,5-tetrakis(bromomethyl)benzene": "1,2,4,5-tetrakis(bromomethyl)benzene",
+    "1-(bromomethyl)-4-(1,1-dimethylethyl)benzene": "4-tert-butylbenzyl bromide",
+    "1-benzyl-3-butylimidazolium bromide": "1-benzyl-3-butylimidazolium bromide",
+    "1-octadecyl-3-methylimidazolium bromide": "1-octadecyl-3-methylimidazolium bromide",
+    "1-(3-aminopropyl)-3-butylimidazolium iodide": "1-(3-aminopropyl)-3-butylimidazolium iodide",
+    "1-ethyl-3-methylimidazolium chloride": "1-ethyl-3-methylimidazolium chloride",
+    "1-ethyl-3-methylimidazolium iodide": "1-ethyl-3-methylimidazolium iodide",
 }
 
 
-# ── Solvent normalization ──────────────────────────────────────────────────
 SOLVENT_NORMALIZE = {
     "neat":               "无溶剂",
     "no solvent":         "无溶剂",
@@ -369,10 +417,29 @@ SOLVENT_NORMALIZE = {
     "1-butanol":        "1-butanol",
     "2-butanol":        "2-butanol",
     "supercritical CO2": "supercritical CO2",
+    "scCO2":             "supercritical CO2",
+    "ionic liquid":      "ionic liquid (IL)",
+    # Long-form names exactly as the raw Reaxys records write them
+    "N,N-dimethyl-formamide":      "DMF",
+    "dimethyl sulfoxide":          "DMSO",
+    "dimethylsulfoxide":           "DMSO",
+    "tetrahydrofuran":             "THF",
+    "isopropyl alcohol":           "isopropanol",
+    "1,2-dichloro-ethane":         "1,2-dichloroethane",
+    "1,2-dichloro-benzene":        "1,2-dichlorobenzene",
+    "1,2-dichloro- ethane":        "1,2-dichloroethane",
+    "butanone":                    "butanone",
+    "benzonitrile":                "benzonitrile",
+    "1-methyl-pyrrolidin-2-one":   "N-methyl-2-pyrrolidone",
+    "1,2-dimethoxyethane":         "1,2-dimethoxyethane",
+    "dimethyl carbonate":          "dimethyl carbonate",
+    "n-heptane":                   "n-heptane",
+    "1,3,5-trimethyl-benzene":     "mesitylene",
+    "2-methyltetrahydrofuran":     "2-methyltetrahydrofuran",
+    "decane":                      "decane",
 }
 
 
-# ── Catalyst system classification keywords ──────────────────────────────
 IONIC_KW = [
     "BMIM","EMIM","HMIM","OMIM","DMIM","AMIM",
     "[BMIM]","[EMIM]","[HMIM]","[OMIM]","[DMIM]","[AMIM]",
@@ -393,23 +460,34 @@ IONIC_KW = [
     "phosphonium","butyl(triphenyl)phosphonium","methyltriphenylphosphonium",
     "tributylbenzylphosphonium","dodecyltributylphosphonium",
     "TBAB","TBAI","TBAC","TBAF","TBAC","TBD","MTBD","DBU","DMAP","DABCO",
+    "tetra-(n-butyl)ammonium","pyrrolidinium","N-methylpyrrolidinium","N-ethylpyrrolidinium",
 ]
 METAL_KW = [
     "zinc","sodium","potassium","lithium","cobalt","iron","copper",
     "nickel","magnesium","calcium","aluminum","tin","manganese","indium","lanthanum",
     "ZnCl","ZnBr","ZnI","NaCl","NaI","KCl","KI","LiCl","LiBr",
     "FeCl","CoCl","CuCl","NiCl","MgCl","MgBr","CaCl","AlCl","SnCl",
-    "ZnO","MgO","Al2O3","CaO","TiO2",
+    "ZnO","MgO","Al2O3","CaO","TiO2","aluminium",
     "Zn(","Na(","K(","Co(","Fe(","Cu(","Ni(","Mg(","Sn(",
 ]
+# Onium-salt stems matched as substrings (no letter-boundary): systematic IUPAC
+# names embed the cation stem after a prefix, e.g. "3-butylimidazolium",
+# "tetrabutylphosphonium", "pyrazol-2-ium", "hydrobromide" amine salts.
+ONIUM_STEM_RE = re.compile(
+    r"imidazol(?:ium|um|-\d-ium)|imidazole\s+(?:bromide|chloride|iodide)"
+    r"|pyrazol(?:ium|-\d-ium)|pyrazole\s+(?:bromide|chloride|iodide|hydrobromide)"
+    r"|ammonium|ammonio|aminium|anilinium|phosphonium|stibonium|sulfonium"
+    r"|pyridinium|pyrrolidinium|guanidinium|cyclopropenium|azonia"
+    r"|\d-ium\b|betaine|hydrobromide|hydriodide|hydrochloride|hydroiodide"
+)
 BASE_KW = [
     "DBU","DMAP","DABCO","TBD","MTBD","triethylamine","pyridine",
     "tri-n-butylamine","tri-n-butylamine","tributylamine","dimethylamine","diethylamine",
     "dimethylpyridine","iminopyridine","aniline",
+    "1,8-diazabicyclo[5.4.0]undec-7-ene","diazabicyclo","triphenylphosphine","triphenylphosphine oxide",
 ]
 
 
-# ── Schema definitions ─────────────────────────────────────────────────────
 OUT_COLS = [
     "row_id", "reactant_name", "product_name", "yield (%)",
     "temperature (\u2103)", "pressure (MPa)", "time (h)",
@@ -432,204 +510,295 @@ DISC_COLS = [
 ]
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
 def _v(v) -> str:
-    """Stringify value or empty string for None."""
     return "" if v is None else v
 
 
-def is_valid(v) -> bool:
-    return v is not None and bool(str(v).strip()) and str(v).strip() not in ("", "/", "nan")
+_DASHES = "\u2010\u2011\u2012\u2013\u2212\u00ad"
+_BREAK_HYPHEN = re.compile("[" + _DASHES + r"]\s+(?=[a-z])")
+_DASH_CHARS = re.compile("[" + _DASHES + "]")
+
+
+def normalize_text(s: str) -> str:
+    """Repair PDF/Reaxys text artefacts before any matching.
+
+    The raw export writes every hyphen as U+2010 and leaves line-break hyphens
+    inside words ('ammoni\u2010 um iodide', 'tetra\u2010 butyl').  A hyphen followed
+    by whitespace and a lower-case letter is a line break: join the word.
+    Remaining Unicode dashes become ASCII '-', which is what CAT_NORMALIZE uses.
+    """
+    if not s:
+        return s
+    s = _BREAK_HYPHEN.sub("", s)
+    return _DASH_CHARS.sub("-", s)
+
+
+_NUM = r"(\d+(?:\.\d+)?)"
+_YIELD_RE = re.compile(
+    r"^(?P<pre>ca\.?|>|≥)?" + _NUM + r"(?:-" + _NUM + r")?(?P<pct>%)?(?:spectr|chro-?mat|nmr|gc|hplc|isol)?\.?$", re.I)
 
 
 def parse_yield(v) -> Tuple[Optional[float], str]:
-    """Parse a yield value that may be a number, fraction, or percent.
+    """Return (yield_percent, '') or (None, reason).
 
-    Returns (value_or_None, error_reason_or_empty).
+    Taken at face value: '92.9 %Chromat.', '70 %Spectr.', '0.94 Spectr.', '0.8'
+    (a bare number <= 1 is a fraction).  Approximate / bounded values keep the
+    number that is written: 'Ca. 80 %' -> 80, '> 99 %' -> 99; a range 'a - b %'
+    -> its midpoint.  No yield is invented: '< 5 %' (upper bound only), a mass in
+    g, and texts without a number ('Chromat.', '.') have no usable yield.
     """
     if v is None:
-        return None, "None"
-    s = str(v).strip()
-    if s.lower() in ("trace", "n.d.", "n.r.", "", "nan"):
-        return None, f"kw:{s}"
-    s = re.sub(r"^(?:ca\.?|approx\.?|approximately)\s+", "", s, flags=re.I)
-    m = re.match(r"^>?\s*(\d+(?:\.\d+)?)\s*(?:-\s*\d+(?:\.\d+)?)?\s*%?", s)
+        return None, "empty"
+    s = normalize_text(str(v).strip())
+    compact = re.sub(r"\s+", "", s)
+    m = _YIELD_RE.match(compact)
     if not m:
-        return None, f"no_num:{s}"
-    num_str = m.group(1)
-    s_after = s[m.end():].strip()
-    has_percent_sign_in_orig = s_after.startswith("%") or ("%" in s[:m.end()])
-    s_after = s_after.lstrip("%").strip()
-    has_after_text = bool(s_after)
-    has_unit = bool(re.search(
-        r"(?:^|\s)(?:g|mg|kg|mmol|mol|mL|L|equiv|eq\.?|"
-        r"molar|mol\/L|mmol\/mL|mmol\/mol)\b",
-        s, re.I))
-    has_method_suffix = bool(re.search(
-        r"(?:^|\s)(?:spectr\.?|chromat\.?|chro[\u00a0\u2010\u2011]?mat\.?|"
-        r"nmr|gc|gc-ms|hplc|lc|ms|both|nr\.?|n\.r\.?|"
-        r"isol\.?|crude|calc\.?|theoretical)\b",
-        s_after, re.I)) if has_after_text else False
-    try:
-        f = float(num_str)
-    except ValueError:
-        return None, f"bad_num:{s}"
-    if f < 0:
-        return None, f"<0:{f}"
-    should_scale = (
-        (not has_unit and has_method_suffix and f <= 1.0) or
-        (not has_unit and not has_after_text and not has_percent_sign_in_orig and f <= 1.0 and f > 0)
-    )
-    if should_scale:
-        f *= 100.0
-    return round(min(f, 100.0), 2), ""
+        return None, f"no usable yield: {s[:40]!r}"
+    lo, hi, pct = float(m.group(2)), m.group(3), m.group("pct")
+    num = (lo + float(hi)) / 2.0 if hi else lo
+    if not pct:
+        if num > 1.0:
+            return None, f"bare number >1 without %: {s[:40]!r}"
+        num *= 100.0
+    if num > 100.0:
+        return None, f">100%: {s[:40]!r}"
+    return round(num, 2), ""
 
 
-def parse_temp(s: str) -> Optional[float]:
-    if not s:
-        return None
-    ms = list(re.finditer(r"T\s*=\s*(\d+(?:\.\d+)?)\s*(?:deg?C|\?C|\u2103)?", s, re.I))
-    ts = [float(m.group(1)) for m in ms if -50 <= float(m.group(1)) <= 400]
-    if ts:
-        return round(ts[0], 1)
-    if re.search(r"room\s+temp|r\.t\.|overnight", s, re.I):
-        return 25.0
-    return None
+# A reagent of the Reaxys record is accepted ONLY when its whole text equals a
+# dictionary key AND the canonical name has an exact, complete structure in
+# chem_registry.py.  There is no substring matching: a longer name that merely
+# contains a known word ('pyridine' in 'poly(4-vinylpyridine)supported iodine')
+# can therefore never be reduced to that word.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import chem_registry as _reg  # noqa: E402
+
+# Keys whose canonical name would add information the source text does not
+# give (a guessed counter-ion) or that name only a cation.
+_AMBIGUOUS_KEYS = {
+    "BMIM", "EMIM", "HMIM", "imidazolium", "1-methylimidazolium", "pyridinium",
+    "pyridinium-", "tetraphenylphosphonium", "tetra-(n-butyl)ammonium",
+    "tetra(n-butyl)ammonium", "tri-n-butyl(2-hydroxyethyl)ammonium",
+    "triethanolammonium",
+}
 
 
-def parse_pressure(s: str) -> Optional[float]:
-    """Parse pressure; convert to MPa. Returns None if no plausible value."""
-    if not s:
-        return None
-    patterns = [
-        (r"p\s*=\s*(\d+(?:\.\d+)?)\s*(MPa|atm|bar|psi|Torr|Pa)?", 1, 2),
-        (r"(\d+(?:\.\d+)?)\s*(MPa|atm|bar|psi|Torr|Pa)", 1, 2),
-        (r"pressure[:\s]+\s*(\d+(?:\.\d+)?)\s*(MPa|atm|bar|psi|Torr|Pa)?", 1, 2),
-    ]
-    ps = []
-    for pat, gv, gu in patterns:
-        for m in re.finditer(pat, s, re.I):
-            v = float(m.group(gv))
-            u = (m.group(gu) if gu <= (m.lastindex or 0) else "") or ""
-            u = u.strip().lower()
-            if u in ("", "mpa"):
-                pass
-            elif u == "atm":
-                v = v * 0.101325
-            elif u == "bar":
-                v = v * 0.1
-            elif u == "psi":
-                v = v * 0.00689476
-            elif u == "torr":
-                v = v * 0.000133322
-            elif u == "pa":
-                v = v / 1_000_000
-            else:
-                if v > 100:
-                    v = v * 0.000133322
-            if 0 <= v <= 50:
-                ps.append(v)
-    if not ps:
-        if re.search(r"ambient|atmosphere| balloon", s, re.I):
-            return 0.101325
-        return None
-    return round(ps[0], 5)
+def _norm_key(s: str) -> str:
+    return re.sub(r"\s+", " ", s.strip()).casefold()
 
 
-def parse_time(s: str) -> Optional[float]:
-    """Parse reaction time in hours."""
-    if not s:
-        return None
-    ts = []
-    for m in re.finditer(r"Time\s*=\s*(\d+(?:\.\d+)?)\s*(h|hr|hour|min|minute|day|d)?", s, re.I):
-        v = float(m.group(1))
-        u = (m.group(2) or "h").strip().lower()
-        if u.startswith("min"):
-            v /= 60.0
-        elif u.startswith("d"):
-            v *= 24.0
-        if 0 < v <= 720:
-            ts.append(v)
-    if not ts:
-        if re.search(r"overnight|隔夜", s, re.I):
-            return 16.0
-        return None
-    return round(ts[0], 2)
+def _usable_canonical(name: str) -> bool:
+    e = _reg.REGISTRY.get(name)
+    return bool(e and e.tier == "exact" and e.smiles and "cation only" not in (e.note or "").lower())
 
 
-def extract_loading(text: str) -> Optional[float]:
-    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:mol[%\uFF05]|mol\s*%)", text, re.I)
-    if m:
-        v = float(m.group(1))
-        if 0 < v <= 100:
-            return round(v, 2)
-    return None
-
-
-def _has_catalyst_feat(text: str) -> bool:
-    """Does the text contain a feature word that signals a catalyst name?"""
-    if not text:
-        return False
-    t = text.lower()
-    suffixes = [
-        "bromide", "chloride", "iodide", "fluoride", "hydroxide",
-        "acetate", "nitrate", "sulfate", " carbonate", " phosphate",
-        "imidazolium", "ammonium", "phosphonium", "pyridinium", "guanidinium",
-        "onium", "sulfonium", "stibonium",
-        "salen", "porphyrin", "phthalocyanine", "Schiff base",
-        "tetrabutyl", "tetramethyl", "tetraethyl", "tetraphenyl",
-        "benzyltrimethyl", "methyltributyl", "benzyl triethyl",
-        "cholin", "ionic liquid",
-    ]
-    return any(s in t for s in suffixes)
-
-
-def _normalize_cat(name: str) -> Optional[str]:
-    """CAT_NORMALIZE lookup: exact match first, then substring (longest-key first)."""
-    if not name:
-        return None
-    n = name.strip().lower()
-    if not n or len(n) < 2:
-        return None
-    if n in CAT_NORMALIZE:
-        return CAT_NORMALIZE[n]
-    for k in sorted(CAT_NORMALIZE, key=len, reverse=True):
-        if len(k) < 4:
+def _build_cat_lookup() -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for k, v in CAT_NORMALIZE.items():
+        if k in _AMBIGUOUS_KEYS or not _usable_canonical(v):
             continue
-        kl = k.lower()
-        if kl in n:
-            return CAT_NORMALIZE[k]
-    return None
+        out[_norm_key(k)] = v
+    # every exact registry catalyst is also reachable under its own registry name
+    for k in _reg.CATALYSTS:
+        if k not in _AMBIGUOUS_KEYS and _usable_canonical(k):
+            out.setdefault(_norm_key(k), k)
+    return out
 
 
-def classify(cats: List[str]) -> str:
-    """Five-class: ionic_liquid / metal_halide / organic_base / mixed_system / unknown."""
-    if not cats:
-        return "unknown"
-    text = " ".join(str(c).lower() for c in cats if c)
-
-    def token_match(keyword: str) -> bool:
-        return bool(re.search(r"(?<![a-zA-Z])" + re.escape(keyword.lower()) + r"(?![a-zA-Z])", text))
-
-    ionic_count = sum(1 for k in IONIC_KW if token_match(k))
-    metal_count = sum(1 for k in METAL_KW if token_match(k))
-    base_count = sum(1 for k in BASE_KW if token_match(k))
-    active = sum(1 for c in (ionic_count, metal_count, base_count) if c > 0)
-    if active >= 2:
-        return "mixed_system"
-    if ionic_count >= 1:
-        return "ionic_liquid"
-    if metal_count >= 1:
-        return "metal_halide"
-    if base_count >= 1:
-        return "organic_base"
-    return "unknown"
+_CAT_LOOKUP: Dict[str, str] = {}
+_SOLV_LOOKUP: Dict[str, str] = {}
 
 
-def is_blacklist(cond: str) -> bool:
-    if not cond:
+def _init_lookups() -> None:
+    _CAT_LOOKUP.clear(); _CAT_LOOKUP.update(_build_cat_lookup())
+    _SOLV_LOOKUP.clear()
+    for k, v in SOLVENT_NORMALIZE.items():
+        if v == "无溶剂" or (v in _reg.REGISTRY and _reg.REGISTRY[v].tier == "exact"):
+            _SOLV_LOOKUP[_norm_key(k)] = v
+
+
+_MATERIAL_RE = re.compile(
+    r"poly|support|immobili|graft|framework|\bMOF\b|resin|silica|MCM|SBA|composite|@|nano|"
+    r"cellulose|zeolite|\bCOF\b|covalent|mesopor|porous|Amberlyst|loaded|impregnat|modified|"
+    r"functionali[sz]ed|hybrid|\bon\b|\bgel\b|membrane|carbon(?!ate|yl|\s+dioxide|\s+tetra)|graphene|clay|magnetic|Fe3O4|"
+    r"chitosan|\bPS-|\bPEG|\bIL-|ionic liquid|cross-linked|crosslinked|lattice|network", re.I)
+
+# Narrative text only: heterogeneous supports / polymers / frameworks / immobilised catalysts.
+# (Narrower than _MATERIAL_RE, which is meant for a single reagent name, not for prose.)
+_PROSE_MATERIAL_RE = re.compile(
+    r"polymer|polystyrene|supported\b|immobili[sz]|graft|framework|\bMOFs?\b|\bCOFs?\b|\bZIF\b|"
+    r"resin|\bMCM|\bSBA|composite|zeolite|mesoporous|nanoparticle|nanotube|nanosheet|"
+    r"cellulose|chitosan|graphene|heterogeneous|cross-?linked", re.I)
+
+# Raw molecular-formula / coordination-compound text ('C24H32Br2CoN6', 'Zn(2+)', '2C2H3N').
+# A bare '[' is NOT evidence of a formula (IUPAC names use it: 'bicyclo[5.4.0]'); only
+# '[<element symbol>' followed by a digit / bracket / space opens a coordination formula.
+_FORMULA_RE = re.compile(
+    r"[A-Z][a-z]?\d+[A-Z(]|\d[A-Z][a-z]?\d|\*|\(\d[+-]\)|\d\s?[+-]\)|\{|\[[A-Z][a-z]?\d*[\[\]() ]")
+# A component that is plausibly a catalyst (metal, onium cation, halide/hydroxide salt, salen,
+# porphyrin, complex): it may NOT be demoted to an auxiliary reagent without a structure.
+_CATALYST_LIKE_RE = re.compile(
+    r"\b(?:lithium|sodium|potassium|rubidium|cesium|caesium|magnesium|calcium|strontium|barium|"
+    r"zinc|cadmium|mercury|copper|silver|gold|nickel|palladium|platinum|cobalt|rhodium|iridium|"
+    r"iron|ruthenium|osmium|manganese|chromium|molybdenum|tungsten|vanadium|niobium|tantalum|"
+    r"titanium|zirconium|hafnium|scandium|yttrium|lanthan\w*|cerium|ytterbium|gadolinium|"
+    r"aluminium|aluminum|gallium|indium|tin|lead|bismuth|antimony|germanium|silicon|boron)\b"
+    r"|ammonium|phosphonium|imidazolium|pyrazolium|pyridinium|guanidinium|sulfonium|stibonium|"
+    r"arsonium|iminium|salen|porphyr|complex|catalyst|(?:ide|ate)\(|\bcopper\b|"
+    r"\b(?:bromide|chloride|iodide|fluoride|hydroxide|acetate|carbonate|oxide|oxo|cobaltite|molybdate)\b|"
+    r"\b(?:[A-Z][a-z]?)(?:\([IVX]+\))", re.I)
+
+# Things that may NOT be kept as a plain-text auxiliary reagent: complexes / MOFs / code-named
+# materials (metal symbol, brackets, 'XXX-123'), inorganic frameworks, and parse residue.
+_AUX_REJECT_WORDS = re.compile(
+    r"prussian|lignin|magnesia|schiff|salen|porphyr|\boxide\b|\bblue\b|hydrate\b", re.I)
+# case-sensitive: a metal symbol glued to a capital/digit/bracket, e.g. 'ZnF', 'CoTPP', 'Zn(', 'Ni('
+_AUX_REJECT_SYMBOL = re.compile(
+    r"[()\[\]{}°]|"
+    r"(?:Li|Na|Rb|Cs|Mg|Ca|Sr|Ba|Zn|Cd|Hg|Cu|CU|Ag|Au|Ni|Pd|Pt|Co|Rh|Ir|Fe|Ru|Os|Mn|Cr|Mo|Nb|Ta|"
+    r"Ti|Zr|Hf|Sc|La|Ce|Yb|Gd|Al|Ga|In|Sn|Pb|Bi|Sb|Ge)(?=[A-Z\d(])|"
+    r"\b[A-Za-z]{1,6}-?\d{2,}\b")
+
+
+def _aux_ok(comp: str) -> bool:
+    """True when an unresolved plain-named component may be kept as auxiliary reagent text."""
+    if not re.search(r"[A-Za-z]{4,}", comp):          # parse residue such as '4O'
         return False
-    return any(pat.search(cond) for pat in CAT_BLACKLIST_PATTERNS)
+    return not (_AUX_REJECT_WORDS.search(comp) or _AUX_REJECT_SYMBOL.search(comp))
+
+_HYDRATE = re.compile(r"\s*(?:\*|·|\.)?\s*(?:\d+\s*)?(?:hexa|di|tetra|tri|mono|penta)?hydrate$", re.I)
+_LOADING = re.compile(r"\(?\s*(\d+(?:\.\d+)?)\s*mol\s*%\s*\)?", re.I)
+
+
+def _split_top(text: str, seps: str = ",;") -> List[str]:
+    """Split on ', ' / '; ' at bracket depth 0 (never inside '1,3-' or '(a, b)')."""
+    parts, buf, depth = [], [], 0
+    for i, ch in enumerate(text):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        if depth == 0 and ch in seps and i + 1 < len(text) and text[i + 1].isspace():
+            parts.append("".join(buf)); buf = []
+        else:
+            buf.append(ch)
+    parts.append("".join(buf))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _split_solvent_clause(seg: str) -> Tuple[str, Optional[str]]:
+    """'A, B in S1, S2' -> ('A, B', 'S1, S2').  The LAST depth-0 ' in ' starts the solvent clause."""
+    depth, cut = 0, None
+    for m in re.finditer(r"[()\[\]{}]|\s+in\s+", seg):
+        t = m.group(0)
+        if t in "([{":
+            depth += 1
+        elif t in ")]}":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            cut = m
+    if cut is None:
+        return seg.strip(), None
+    return seg[:cut.start()].strip(), seg[cut.end():].strip()
+
+
+def resolve_catalyst(comp: str) -> Tuple[Optional[str], Optional[float]]:
+    """Whole-text lookup of one reagent. Returns (canonical_name or None, loading mol%)."""
+    t = comp.strip()
+    loading = None
+    lm = _LOADING.search(t)
+    if lm:
+        v = float(lm.group(1))
+        loading = round(v, 2) if 0 < v <= 100 else None
+        t = (t[:lm.start()] + t[lm.end():]).strip(" ,")
+    t = _HYDRATE.sub("", t) if _norm_key(t) not in _CAT_LOOKUP else t
+    return _CAT_LOOKUP.get(_norm_key(t)), loading
+
+
+# A structured Reaxys record reads
+#   With <reagent>, <reagent> in <solvent>, Time= 5h, T= 20 °C , p= 750.075Torr , <tags> <authors; journal; (year)>
+# Rows that start with free procedure prose are NOT parsed: the reagent list
+# appended to such prose is often incomplete (the main catalyst is described
+# only in the prose), so a partial list cannot be told apart from a full one.
+_FIELD_START = re.compile(r"(?<![A-Za-z0-9])(?:Time|T|p)\s*=")
+_FIELD_VAL = {
+    "Time": re.compile(r"\s*,?\s*(Time)\s*=\s*(\d+(?:\.\d+)?)\s*(h)(?![A-Za-z])"),
+    "T":    re.compile(r"\s*,?\s*(T)\s*=\s*(-?\d+(?:\.\d+)?)\s*(°C)"),
+    "p":    re.compile(r"\s*,?\s*(p)\s*=\s*(\d+(?:\.\d+)?)\s*(Torr)(?![A-Za-z])"),
+}
+_NONTHERMAL = re.compile(
+    r"Irradiation|Microwave|electrolysis|Flow reactor|Ultrasound|Photo|\bStage\s*\d|Cooling with ice", re.I)
+_TAGS = [
+    "Autoclave", "Catalytic behavior", "Reagent/catalyst", "Temperature", "Pressure", "Schlenk technique",
+    "Sealed tube", "Green chemistry", "Inert atmosphere", "Solvent", "Supercritical conditions",
+    "Ambient temperature", "Molecular sieve", "regioselective reaction", "chemoselective reaction",
+    "High pressure", "Glovebox", "Ionic liquid", "Kinetics", "Time", "neat (no solvent)",
+    "General procedure:", "Typical procedure:",
+]
+_TAG_RE = re.compile(r"^\s*,?\s*(?:" + "|".join(re.escape(t) for t in _TAGS) + r")\s*,?\s*", re.I)
+
+
+def split_record(cond: str) -> Optional[Tuple[str, str]]:
+    """('A, B in S', 'Time= ..., rest') for a pure structured row, else None."""
+    m = re.match(r"\s*With\s+", cond, re.I)
+    if not m:
+        return None
+    rest = cond[m.end():]
+    f = _FIELD_START.search(rest)
+    if not f:
+        return rest, ""
+    return rest[:f.start()].rstrip(" ,"), rest[f.start():]
+
+
+def parse_fields(tail: str) -> Tuple[Dict[str, float], str, str]:
+    """Read the contiguous 'Time= / T= / p=' block.
+
+    Returns (values, remainder_after_block, error).  A field that is present but
+    not a single number with its unit (ranges '0 - 160 °C', stages, repeated
+    fields) is an error: the record is ambiguous, not merely incomplete.
+    """
+    vals: Dict[str, float] = {}
+    pos = 0
+    while True:
+        hit = None
+        for key, rx in _FIELD_VAL.items():
+            m = rx.match(tail, pos)
+            if m:
+                hit = (key, m); break
+        if not hit:
+            break
+        key, m = hit
+        if key in vals:
+            return {}, "", f"{key} given twice"
+        v = float(m.group(2))
+        if key == "p":
+            v = round(v * 0.000133322, 5)
+        vals[key] = v
+        pos = m.end()
+    rem = tail[pos:]
+    if _FIELD_START.match(rem.lstrip(" ,")):
+        return {}, "", "field is a range / not a single value: " + rem.strip()[:40]
+    if "T" in vals and not -50 <= vals["T"] <= 400:
+        return {}, "", f"T out of range: {vals['T']}"
+    if "Time" in vals and not 0 < vals["Time"] <= 720:
+        return {}, "", f"time out of range: {vals['Time']}"
+    if "p" in vals and not 0 <= vals["p"] <= 50:
+        return {}, "", f"p out of range: {vals['p']}"
+    return vals, rem, ""
+
+
+def parse_reference(rem: str) -> Tuple[str, Optional[int]]:
+    """(reference text, year) from what follows the Time/T/p block."""
+    s = rem.strip()
+    while True:
+        m = _TAG_RE.match(s)
+        if not m:
+            break
+        s = s[m.end():]
+    s = s.strip(" ,")
+    ym = re.search(r"\((\d{4})\)", s)
+    year = int(ym.group(1)) if ym and 1900 <= int(ym.group(1)) <= 2100 else None
+    return (s if len(s) >= 15 else "Unknown reference"), year
 
 
 def parse_reactant(row: pd.Series) -> Tuple[Optional[str], Optional[str]]:
@@ -640,165 +809,28 @@ def parse_reactant(row: pd.Series) -> Tuple[Optional[str], Optional[str]]:
     return None, None
 
 
-def extract_catalysts(cond: str, purge_bug: bool = False) -> Tuple[List[str], List[Optional[float]], str]:
-    """Extract (catalyst_names, loadings, unclassified_text) from a Conditions string.
-
-    Strategy
-    --------
-    1. Search all "With 催化剂" snippets first (most reliable).
-    2. If none found, fall back to a full-text keyword search.
-    3. Empty + has_catalyst_feat → extraction_failed.
-    4. Empty + no feature           → _PROCEDURE_ONLY_ (procedural text).
-
-    Direct-parse fallbacks
-    ----------------------
-    For catalysts that don't appear after "With:" (a known dataset quirk),
-    a full-text scan against CAT_NORMALIZE covers IL + metal halide cases.
-    """
-    if not cond or not cond.strip():
-        return [], [], "空Conditions"
-
-    # The two patterns below are intentionally compiled but, by default,
-    # NOT applied — see module docstring "bug-preservation note".
-    clean = cond
-    journal_pat = re.compile(
-        r"\b(?:J\.?\s*Org\.?\s*Chem\.?|J\.?\s*Catal\.?|Green\s*Chem\.?|"
-        r"Angew\.?\s*Chem\.?|Inorg\.?\s*Chem\.?|Appl\.?\s*Catal\.?\s*[AB]?|"
-        r"Dalton\s*Trans\.?|Tetrahedron\s*Lett\.?|Catal\.?\s*Today\.?|"
-        r"J\.?\s*CO2\s*Util\.?|ACS\s*Catal\.?|Chem\.?\s*(?:Sus\.?\s*)?Chem\.?|"
-        r"Mater\.?\s*Today\s*(?:Energy)?|J\.?\s*Mol\.?\s*Catal\.?\s*[AB]?|"
-        r"Chem\.?\s*Commun\.?(?!icat)|Catal\.?\s*Commun\.?|J\.?\s*Mater\.?\s*Chem\.?\s*[AB]?|"
-        r"Chem\.?\s*Eng\.?\s*J\.?|Fuel\s*(?:Process)?|RSC\s*Adv\.?|"
-        r"Synthesis\s+\d{4}.*|doi.*|DOI.*|"
-        r"vol\.?\s*\d+|p\.?\s*\d+(?:-\d+)?|pp\.?\s*\d+|nb\.?|"
-        r"[A-Z][a-z]+\s+\d{4}.*|"
-        r"Patent\s+\w+.*|WO\s*\d+.*|CN\s*\d+.*)", re.I)
-    proc_pat = re.compile(
-        r"(?:general\s+procedure|typical\s+procedure|standard\s+procedure|"
-        r"in\s+a\s+typical\s+run|typical\s+experiment|"
-        r"procedure\s+for\s+cyclic\s+carbonate|cycloaddition\s+procedure|"
-        r"synthesis\s+of\s+carbonates)[^$]{0,300}?(?=\s*(?:With|Time|T\s*=\s*\d|p\s*=\s*\d|$))",
-        re.I | re.S)
-    if purge_bug:
-        clean = journal_pat.sub(" ", clean)
-        clean = proc_pat.sub(" ", clean)
-
-    cats, loads, unclassified = [], [], ""
-    seen = set()
-
-    # Step B: "With 催化剂" snippets
-    with_matches = list(re.finditer(
-        r"(?:^|(?<=[,\s;\.\-–—]))\s*[Ww]ith\s+([A-Za-z0-9\-\+\(\)\[\]\.\s'/]{3,300}?)"
-        r"(?=\s*[,\;\.]?\s*(?:Time|T\s*=\s*\d|p\s*=\s*\d|Time=\s*\d|Qiu|doi|$))",
-        cond))
-
-    if with_matches:
-        for m in with_matches:
-            snippet = m.group(1).strip()
-            if len(snippet) < 3:
-                continue
-            snippet = re.sub(r"[A-Z][a-z]+\s+(?:J\.?|Green|Inorg\.?|Appl\.?|Catal\.?).*", "", snippet)
-            snippet = snippet.strip().rstrip(",;\-. ")
-            if len(snippet) < 3:
-                continue
-            sub_parts = re.split(r"\s+and\s+|\s*;\s*", snippet)
-            for part in sub_parts:
-                part = part.strip()
-                if len(part) < 3 or len(part) > 250:
-                    continue
-                if not _has_catalyst_feat(part):
-                    continue
-                norm = _normalize_cat(part)
-                if norm and norm not in seen:
-                    seen.add(norm)
-                    cats.append(norm)
-                    loads.append(extract_loading(part))
-                elif not norm and _has_catalyst_feat(part):
-                    unclassified = part[:100]
-
-    # Step C: full-text fallback
+def classify(cats: List[str]) -> str:
+    """Five-class: ionic_liquid / metal_halide / organic_base / mixed_system / unknown."""
     if not cats:
-        for kw in sorted(CAT_NORMALIZE, key=len, reverse=True):
-            if len(kw) < 4:
-                continue
-            if kw.lower() in clean.lower():
-                norm = CAT_NORMALIZE[kw]
-                if norm not in seen:
-                    seen.add(norm)
-                    cats.append(norm)
-                    pos = clean.lower().find(kw.lower())
-                    snippet = clean[max(0, pos - 60): pos + 120]
-                    loads.append(extract_loading(snippet))
-                    if len(cats) >= 4:
-                        break
+        return "unknown"
+    text = " ".join(str(c).lower() for c in cats if c)
 
-    cats = cats[:4]
-    loads = loads[:4]
-    while len(cats) > len(loads):
-        loads.append(None)
+    def hit(keyword: str) -> bool:
+        return bool(re.search(r"(?<![a-zA-Z])" + re.escape(keyword.lower()) + r"(?![a-zA-Z])", text))
 
-    if cats:
-        return cats, loads, ""
-    if _has_catalyst_feat(clean):
-        return [], [], clean[:200]
-    return [], [], "_PROCEDURE_ONLY_"
+    ionic = any(hit(k) for k in IONIC_KW) or bool(ONIUM_STEM_RE.search(text))
+    metal = any(hit(k) for k in METAL_KW)
+    base = any(hit(k) for k in BASE_KW)
+    if sum((ionic, metal, base)) >= 2:
+        return "mixed_system"
+    return "ionic_liquid" if ionic else "metal_halide" if metal else "organic_base" if base else "unknown"
 
 
-def extract_solvents(cond: str) -> List[str]:
-    """Extract solvents (returns ['无溶剂'] for solvent-free conditions)."""
-    if not cond:
-        return []
-    if re.search(r"(?:in\s+)?(?:neat|no\s+solvent|without\s+solvent|in\s+\(no\s+solent?\)|"
-                 r"solvent[\- ]free|free[\- ]of\s+solvent|absence\s+of\s+solvent|"
-                 r"neat\s+condi|no\s+additives?|neat\s+condition)", cond, re.I):
-        return ["无溶剂"]
-    found = []
-    for name, norm in SOLVENT_NORMALIZE.items():
-        if name == "无溶剂":
-            continue
-        if re.search(r"\b" + re.escape(name) + r"\b", cond, re.I):
-            if norm not in found:
-                found.append(norm)
-    return found[:4]
+def is_blacklist(text: str) -> bool:
+    return bool(text) and any(p.search(text) for p in CAT_BLACKLIST_PATTERNS)
 
 
-def extract_ref_year(cond: str) -> Tuple[str, Optional[int]]:
-    """Extract (reference, publication_year) from the end of a Conditions string."""
-    if not cond:
-        return "Unknown reference", None
-    s = str(cond)
-
-    parts = s.split("Torr")
-    ref_part = "Torr".join(parts[1:]).strip() if len(parts) >= 2 else s
-    ref_part = ref_part.strip().lstrip(",").lstrip(" ")
-
-    skip_prefixes = [
-        "Autoclave,", "Autoclave ", "Schlenk technique,", "Schlenk technique ",
-        "Irradiation,", "Irradiation ", "Green chemistry,",
-        "Temperature, Pressure,", "Temperature, Pressure ",
-        "Catalytic behavior,", "Catalytic behavior ",
-        "Reagent/catalyst,", "Reagent/catalyst ", "Solvent-free,",
-        "General procedure:", "Typical procedure:", "Sealed tube,", "Sealed tube ",
-    ]
-    for prefix in skip_prefixes:
-        if ref_part.startswith(prefix):
-            ref_part = ref_part[len(prefix):]
-            break
-
-    year_match = re.search(r"\((\d{4})\)", ref_part)
-    year: Optional[int] = None
-    if year_match:
-        y = int(year_match.group(1))
-        if 1900 <= y <= 2100:
-            year = y
-    ref = ref_part.strip().rstrip("., ")
-    if len(ref) < 15:
-        return "Unknown reference", year
-    return ref, year
-
-
-# ── Row-level helper ───────────────────────────────────────────────────────
-def _make_disc_row(rid: int, reason: str) -> Dict:
+def _disc(rid: int, reason: str) -> Dict:
     return dict(
         row_id=rid,
         catalyst_1_name="", catalyst_2_name="", catalyst_3_name="", catalyst_4_name="",
@@ -807,114 +839,201 @@ def _make_disc_row(rid: int, reason: str) -> Dict:
     )
 
 
-# ── Core cleaning logic ───────────────────────────────────────────────────
+def _resolve_solvents(clause: Optional[str]) -> Tuple[List[str], Optional[str]]:
+    """(canonical solvents, offending_text).  None clause -> ([], None): not reported."""
+    if clause is None:
+        return [], None
+    c = clause.strip()
+    if re.match(r"neat\b", c, re.I):                       # 'neat (no solvent)', 'neat liquid', ...
+        return ["无溶剂"], None
+    out: List[str] = []
+    for part in _split_top(c):
+        hit = _SOLV_LOOKUP.get(_norm_key(part))
+        if hit is None:
+            return [], part
+        if hit not in out:
+            out.append(hit)
+    return out, None
+
+
+def process_row(rid: int, row: pd.Series) -> Tuple[Optional[Dict], Optional[Tuple[str, str, str]]]:
+    """Return (valid_row, None) or (None, (bucket, reason, raw_text)).
+
+    bucket 'discard' = the record contains something that cannot be represented
+    (material, polymer, unknown additive, ambiguous field, other reaction mode);
+    bucket 'repair'  = only a short, plain-looking reagent name is unknown, i.e.
+    the dictionary could be extended to rescue the row.
+    """
+    rat, prd = parse_reactant(row)
+    if rat is None:
+        return None, ("discard", f"底物不在支持范围:{str(row.get('Reaction'))[:60]}", "")
+    yv, why = parse_yield(row.get("Yield"))
+    if yv is None:
+        return None, ("discard", f"产率无法解析:{why}", "")
+
+    con = normalize_text(str(row.get("Conditions", "")).strip())
+    parts = split_record(con)
+    if parts is not None:
+        head, tail = parts
+        if not tail:
+            return None, ("discard", "缺少 Time/T/p 字段", con[:200])
+        if is_blacklist(head):
+            return None, ("discard", "催化剂为材料/MOF/聚合物/光电催化", con[:200])
+        parse_fn = "structured"
+    else:
+        # Prose-led row: look for a 'With...' tail at the very end.
+        ws = list(re.finditer(r"(?<![A-Za-z])With\s+", con))
+        if not ws:
+            return None, ("discard", "非结构化记录且无reagent-style尾部", con[:200])
+        last_with = ws[-1]
+        sub = split_record(con[last_with.start():])
+        if sub is None or not sub[1]:
+            return None, ("discard", "缺少 Time/T/p 字段", con[:200])
+        head, tail = sub
+        if is_blacklist(con[last_with.start():][:200]):
+            return None, ("discard", "尾部reagents为材料/MOF/聚合物", con[:200])
+        # The narrative before the tail may reveal a support / framework / polymer that the
+        # trailing reagent list leaves out: then the record is incomplete and is dropped.
+        if is_blacklist(con[:last_with.start()]) or _PROSE_MATERIAL_RE.search(con[:last_with.start()]):
+            return None, ("discard", "操作文本含材料/MOF/聚合物载体", con[:200])
+        parse_fn = "prose_tail"
+
+    reagents, solv_clause = _split_solvent_clause(head)
+    vals, rem, err = parse_fields(tail)
+    if err:
+        return None, ("discard", "条件字段不明确:" + err, con[:200])
+    if not vals and not re.search(r"\(\d{4}\)", rem):
+        return None, ("discard", "缺少 Time/T/p 字段且无参考年份", con[:200])
+    if _NONTHERMAL.search(rem[:200]) or (parse_fn == "structured" and _NONTHERMAL.search(head)):
+        return None, ("discard", "非常规加热方式(光照/微波/电解/流动/分段)", con[:200])
+
+    solvents, bad_s = _resolve_solvents(solv_clause)
+    if bad_s is not None:
+        return None, ("discard", f"溶剂无法确定:{bad_s[:60]}", con[:200])
+
+    names: List[str] = []
+    loads: List[Optional[float]] = []
+    unresolved: List[str] = []
+    for comp in _split_top(reagents):
+        name, ld = resolve_catalyst(comp)
+        if name is None:
+            if _MATERIAL_RE.search(comp):
+                return None, ("discard", f"组分为材料/聚合物/负载体系:{comp[:70]}", con[:200])
+            if _FORMULA_RE.search(comp):
+                # Only an element-count / charge-state string: it names a compound but carries no
+                # connectivity, so it cannot be turned into a SMILES (no DRFP, no xTB input).
+                return None, ("discard", f"组分仅有分子式/配位式(无连接性):{comp[:70]}", con[:200])
+            # a long but plain-looking name is a discrete molecule missing from the
+            # registry (-> repair list), not a material; only absurd lengths are noise
+            if len(comp) > 120:
+                return None, ("discard", f"组分无法确定结构:{comp[:70]}", con[:200])
+            if _CATALYST_LIKE_RE.search(comp) or not _aux_ok(comp) or len(comp) > 60:
+                # looks like a catalyst (metal / onium / halide salt): must have a structure
+                return None, ("repair", f"组分无法确定结构:{comp[:70]}", con[:200])
+            sv = _SOLV_LOOKUP.get(_norm_key(comp))
+            if sv is not None:                         # a solvent listed among the reagents
+                if sv not in solvents and len(solvents) < 4:
+                    solvents.append(sv)
+                continue
+            unresolved.append(comp.strip())
+            continue
+        if name not in names:
+            names.append(name); loads.append(ld)
+    if not names:
+        bad = unresolved[0] if unresolved else ""
+        return None, ("repair" if bad else "discard",
+                      f"组分无法确定结构:{bad[:70]}" if bad else "无催化剂", con[:200])
+    # Named species without a registry structure are auxiliary reagents only when
+    # the row already has a structure-resolved primary catalyst; more than two
+    # cannot be kept in the reagent columns, so the row is routed to repair.
+    if len(unresolved) > 2:
+        return None, ("repair", f"辅助试剂>2:{'; '.join(unresolved)[:70]}", con[:200])
+    if len(names) > 4:
+        return None, ("discard", f"催化剂组分>4({len(names)})", con[:200])
+
+    ref, year = parse_reference(rem)
+    pad = lambda xs, i: xs[i] if i < len(xs) else None  # noqa: E731
+    r = {
+        "row_id": rid, "reactant_name": rat, "product_name": prd, "yield (%)": yv,
+        "temperature (\u2103)": _v(vals.get("T")),
+        "pressure (MPa)": _v(vals.get("p")),
+        "time (h)": _v(vals.get("Time")),
+    }
+    for i in range(4):
+        r[f"catalyst_{i+1}_name"] = _v(pad(names, i)) or ""
+        r[f"catalyst_{i+1}_loading_mol%"] = _v(pad(loads, i)) or ""
+    r.update({
+        "reagent_1_name": unresolved[0] if len(unresolved) > 0 else "",
+        "reagent_2_name": unresolved[1] if len(unresolved) > 1 else "",
+        "solvent_1": solvents[0] if len(solvents) > 0 else "",
+        "solvent_2": solvents[1] if len(solvents) > 1 else "",
+        "solvent_3": solvents[2] if len(solvents) > 2 else "",
+        "solvent_4": solvents[3] if len(solvents) > 3 else "",
+        "reference": ref, "publication_year": year if year else "",
+        "extraction_status": "valid", "catalyst_system_type": classify(names),
+        "all_solvents_normalized": "; ".join(solvents),
+    })
+    return r, None
+
+
 def clean_dataset(
     df_raw: pd.DataFrame,
-    purge_bug: bool = False,
-    progress_every: int = 300,
-) -> Tuple[List[Dict], List[Dict], List[Dict]]:
-    """Run the cleaning loop; return (valid_rows, extraction_failures, discards)."""
+    progress_every: int = 500,
+) -> Tuple[List[Dict], List[Dict], List[Dict], Dict]:
+    """Return (valid_rows, extraction_failures, discards, stats)."""
+    if not _CAT_LOOKUP:
+        _init_lookups()
     valid_r, ext_r, disc_r = [], [], []
-    st = dict(total=0, valid=0, disc=0, ext=0, sub=0, yl=0, bl=0, cond=0)
-    t0 = time.time()
-
+    st = dict(total=0, valid=0, disc=0, ext=0, sub=0, yl=0, bl=0, cond=0, dup=0)
+    reasons: Counter = Counter()
+    seen: Dict[Tuple, int] = {}
+    seen_parsed: Dict[Tuple, int] = {}
     for idx, row in df_raw.iterrows():
         st["total"] += 1
         rid = idx + 1
-        rx = str(row.get("Reaction", "")).strip()
-        yr = row.get("Yield", None)
-        con = str(row.get("Conditions", "")).strip()
-
-        # 1. Substrate
-        rat, prd = parse_reactant(row)
-        if rat is None:
-            disc_r.append(_make_disc_row(rid, f"底物无法归类:{rx[:80]}"))
-            st["sub"] += 1; st["disc"] += 1
+        key = (str(row.get("Reaction")).strip(), str(row.get("Yield")).strip(),
+               normalize_text(str(row.get("Conditions")).strip()))
+        if key in seen:
+            disc_r.append(_disc(rid, f"与第{seen[key]}行完全重复(Reaction/Yield/Conditions 相同)"))
+            st["dup"] += 1; st["disc"] += 1
             continue
-
-        # 2. Yield
-        yv, ym = parse_yield(yr)
-        if yv is None:
-            disc_r.append(_make_disc_row(rid, f"产率无效:{ym}"))
-            st["yl"] += 1; st["disc"] += 1
-            continue
-
-        # 3. Blacklist
-        if is_blacklist(con):
-            disc_r.append(_make_disc_row(rid, "命中黑名单(MOF/聚合物/光催化/电催化)"))
-            st["bl"] += 1; st["disc"] += 1
-            continue
-
-        # 4. Catalysts + conditions
-        cn, cl, cm = extract_catalysts(con, purge_bug=purge_bug)
-        tp = parse_temp(con); pr = parse_pressure(con); tm = parse_time(con)
-        if tp is None and pr is None and tm is None:
-            disc_r.append(_make_disc_row(rid, "三项条件全缺失"))
-            st["cond"] += 1; st["disc"] += 1
-            continue
-
-        if not cn:
-            if cm == "_PROCEDURE_ONLY_":
-                disc_r.append(_make_disc_row(rid, "无催化剂信息（纯操作文本）"))
-                st["disc"] += 1; st["ext"] += 1
+        seen[key] = rid
+        ok, bad = process_row(rid, row)
+        if ok is not None:
+            # Second-level dedupe on the PARSED record: two raw rows whose text
+            # differs but whose every output column (except row_id) is identical
+            # are the same experiment (e.g. general-procedure line + summary line).
+            pkey = tuple(str(v) for k, v in ok.items() if k != "row_id")
+            if pkey in seen_parsed:
+                disc_r.append(_disc(rid, f"与第{seen_parsed[pkey]}行解析后全部字段完全一致(重复实验)"))
+                st["dup"] += 1; st["disc"] += 1
                 continue
-            ext_r.append(dict(
-                source_row_id=rid,
-                discard_reason=f"无法解析催化剂:{cm[:100] if cm else con[:120]}",
-                discard_type="extraction_failed_repair_needed",
-                affected_field="catalyst",
-                raw_value=con[:500],
-                suggested_fix="请检查Conditions补充催化剂名称到CAT_NORMALIZE字典",
-            ))
-            st["ext"] += 1
+            seen_parsed[pkey] = rid
+            valid_r.append(ok); st["valid"] += 1
             continue
-
-        # 5. Solvents, ref, type
-        sols = extract_solvents(con)
-        ref, pub_year = extract_ref_year(con)
-        ctype = classify(cn)
-        valid_r.append({
-            "row_id": rid,
-            "reactant_name": rat,
-            "product_name": prd,
-            "yield (%)": yv,
-            "temperature (\u2103)": _v(tp),
-            "pressure (MPa)": _v(pr),
-            "time (h)": _v(tm),
-            "catalyst_1_name": _v(cn[0]) if len(cn) > 0 else "",
-            "catalyst_1_loading_mol%": _v(cl[0]) if len(cl) > 0 and cl[0] else "",
-            "catalyst_2_name": _v(cn[1]) if len(cn) > 1 else "",
-            "catalyst_2_loading_mol%": _v(cl[1]) if len(cl) > 1 and cl[1] else "",
-            "catalyst_3_name": _v(cn[2]) if len(cn) > 2 else "",
-            "catalyst_3_loading_mol%": _v(cl[2]) if len(cl) > 2 and cl[2] else "",
-            "catalyst_4_name": _v(cn[3]) if len(cn) > 3 else "",
-            "catalyst_4_loading_mol%": _v(cl[3]) if len(cl) > 3 and cl[3] else "",
-            "reagent_1_name": "", "reagent_2_name": "",
-            "solvent_1": _v(sols[0]) if len(sols) > 0 else "",
-            "solvent_2": _v(sols[1]) if len(sols) > 1 else "",
-            "solvent_3": _v(sols[2]) if len(sols) > 2 else "",
-            "solvent_4": _v(sols[3]) if len(sols) > 3 else "",
-            "reference": ref,
-            "publication_year": pub_year if pub_year else "",
-            "extraction_status": "valid",
-            "catalyst_system_type": ctype,
-            "all_solvents_normalized": "; ".join(sols),
-        })
-        st["valid"] += 1
-
-        if (rid % progress_every == 0) or (rid == len(df_raw)):
-            el = time.time() - t0
-            rate = rid / el if el > 0 else 0
-            eta = (len(df_raw) - rid) / rate if rate > 0 else 0
-            logger.info(
-                "  %d/%d valid=%d disc=%d ext=%d %.0fs ETA=%.0fs",
-                rid, len(df_raw), st["valid"], st["disc"], st["ext"], el, eta,
-            )
-
+        bucket, reason, raw_txt = bad
+        reasons[reason.split(":")[0]] += 1
+        if bucket == "repair":
+            ext_r.append(dict(source_row_id=rid, discard_reason=reason,
+                              discard_type="extraction_failed_repair_needed", affected_field="catalyst",
+                              raw_value=raw_txt, suggested_fix="确认结构后加入 CAT_NORMALIZE 与 chem_registry"))
+            st["ext"] += 1
+        else:
+            disc_r.append(_disc(rid, reason)); st["disc"] += 1
+        if reason.startswith("底物"):
+            st["sub"] += 1
+        elif reason.startswith("产率"):
+            st["yl"] += 1
+        elif "材料" in reason:
+            st["bl"] += 1
+        elif "字段" in reason or "Time/T/p" in reason:
+            st["cond"] += 1
+        if progress_every and rid % progress_every == 0:
+            logger.info("  %d/%d valid=%d", rid, len(df_raw), st["valid"])
+    st["reasons"] = dict(reasons)
     return valid_r, ext_r, disc_r, st
 
 
-# ── Encoding-tolerant loader ──────────────────────────────────────────────
 def load_raw_csv(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Input file not found: {path}")
@@ -930,7 +1049,6 @@ def load_raw_csv(path: Path) -> pd.DataFrame:
     )
 
 
-# ── save helpers ──────────────────────────────────────────────────────────
 def save_outputs(
     valid_r: List[Dict], ext_r: List[Dict], disc_r: List[Dict],
     cleaned_csv: Path, ext_csv: Path, disc_csv: Path, baseline_json: Path,
@@ -939,15 +1057,15 @@ def save_outputs(
     pd.DataFrame(valid_r, columns=OUT_COLS).to_csv(cleaned_csv, index=False, encoding="utf-8-sig")
     logger.info("Saved %d rows → %s", len(valid_r), cleaned_csv)
 
-    if ext_r:
-        pd.DataFrame(ext_r, columns=EXTR_COLS).to_csv(ext_csv, index=False, encoding="utf-8-sig")
-        logger.info("Saved %d extraction-failure rows → %s", len(ext_r), ext_csv)
-    if disc_r:
-        pd.DataFrame(disc_r, columns=DISC_COLS).to_csv(disc_csv, index=False, encoding="utf-8-sig")
-        logger.info("Saved %d discard rows → %s", len(disc_r), disc_csv)
+    # Always (re)write both reports, header-only when empty, so a report from an
+    # earlier run can never survive next to a fresh cleaned.csv.
+    ext_csv.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(ext_r, columns=EXTR_COLS).to_csv(ext_csv, index=False, encoding="utf-8-sig")
+    logger.info("Saved %d extraction-failure rows → %s", len(ext_r), ext_csv)
+    pd.DataFrame(disc_r, columns=DISC_COLS).to_csv(disc_csv, index=False, encoding="utf-8-sig")
+    logger.info("Saved %d discard rows → %s", len(disc_r), disc_csv)
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Stage 1.1 — clean the raw CO2-cycloaddition CSV",
@@ -959,9 +1077,6 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="Path to the raw Reaxys-style CSV (overrides default).")
     p.add_argument("--output", type=str, default=str(CLEANED_CSV),
                    help="Path to the cleaned CSV (overrides default).")
-    p.add_argument("--purge-bug", action="store_true",
-                   help="(DANGEROUS) re-enable the suppressed journal/procedure strips. "
-                        "This changes the valid row count and breaks downstream benchmarks.")
     p.add_argument("--verbose", action="store_true",
                    help="Enable DEBUG-level logging.")
     return p.parse_args(argv)
@@ -975,6 +1090,7 @@ def configure_logging(verbose: bool = False) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    t_start = time.time()
     args = parse_args(argv)
     configure_logging(verbose=args.verbose)
 
@@ -983,7 +1099,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     discard_csv = DATA_EXTERNAL / "discard_report.csv"
     baseline_json = CLEANED_BASELINE
 
-    # Encoding-handle stdout early
     if sys.stdout.encoding != "utf-8":
         try:
             sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
@@ -994,7 +1109,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info("CO2 环加成原始数据清洗")
     logger.info("=" * 60)
 
-    # Skip if already cleaned
     if not args.force and output_csv.exists():
         try:
             existing = pd.read_csv(output_csv, encoding="utf-8-sig")
@@ -1009,12 +1123,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     logger.info("[2/5] Cleaning %d rows …", len(df_raw))
     valid_r, ext_r, disc_r, st = clean_dataset(
-        df_raw, purge_bug=args.purge_bug, progress_every=300,
+        df_raw, progress_every=300,
     )
 
     save_outputs(valid_r, ext_r, disc_r, output_csv, extraction_csv, discard_csv, baseline_json)
 
-    logger.info("[3/5] Done in %.1fs.", time.time() - 0.0)
+    logger.info("[3/5] Done in %.1fs.", time.time() - t_start)
     logger.info("=" * 60)
     logger.info("  raw=%d valid=%d discard=%d extraction_failed=%d",
                 st["total"], st["valid"], st["disc"], st["ext"])
@@ -1022,7 +1136,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                 st["sub"], st["yl"], st["bl"], st["cond"])
     logger.info("=" * 60)
 
-    # Baseline JSON
     summary = dict(
         valid_rows=st["valid"],
         total_rows=st["total"],
