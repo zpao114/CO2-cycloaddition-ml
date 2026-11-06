@@ -119,11 +119,11 @@ data/external/
 # ============================================================
 figures/*
 !figures/fig1_data_overview_en.png
-!figures/fig2_protocol_comparison_en.png
-!figures/fig3_loso_root_cause_en.png
-!figures/fig6_ablation_en.png
-!figures/workflow_figure_1.png
-!figures/fig0_toc_en.png
+!figures/fig2_rsep_workflow_en.png
+!figures/fig3_protocol_comparison_en.png
+!figures/fig4_loso_root_cause_en.png
+!figures/fig5_ablation_en.png
+!figures/si_fig_s1_latent_quality.png
 # root-level stray figure files (not committed)
 fig0_graphical_abstract.*
 fig4_loso_root_cause.*
@@ -279,6 +279,7 @@ results_publication_bias_sensitivity/
 # ============================================================
 # Author-local temp / backups / audit docs — NOT committed
 # ============================================================
+.acl-recovery/
 _tmp_*
 _t.png
 AUDIT_REPORT.md

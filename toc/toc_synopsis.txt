@@ -1,0 +1,17 @@
+TOC SYNOPSIS
+
+OPTION 1 - Standard
+The same 1,033 CO2 cycloaddition reactions, folds, seeds and regressor are
+evaluated under two encoder workflows: pretrain-then-freeze and per-fold
+retraining. The paired difference isolates evaluation inflation from genuine
+chemical generalisation: the mainstream workflow overstates leave-one-
+substrate-out R2 of a property-supervised autoencoder by 0.40 on average
+(cyclohexene oxide, 1.01), while an unsupervised autoencoder is
+unaffected. Four minimum reporting standards are proposed.
+
+OPTION 2 - Ultra-short
+Pretraining an encoder on the full dataset and freezing it across folds
+inflates leave-one-substrate-out R2 by 0.40 on average
+(cyclohexene oxide, 1.01). A paired protocol comparison separates
+this evaluation artifact from genuine chemical generalisation and yields four
+minimum reporting standards for reaction-yield models.
