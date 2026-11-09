@@ -1,0 +1,19 @@
+{
+ "real": {
+  "r2_transductive_x": -0.24555086964933093,
+  "r2_pretrain_frozen": -0.00555302013943737,
+  "delta_label": 0.23999784950989356
+ },
+ "perm_mean": -0.014761659243182257,
+ "perm_sd": 0.10842673751990947,
+ "p_value": 0.047619047619047616,
+ "n_perm": 20,
+ "interpretation": "Delta_label(real) >> Delta_label(shuffled)  => the gap is carried by the labels the encoder saw (label leakage).  Comparable values => the gap is not a label effect.",
+ "lambda_prop": 0.2,
+ "epochs": 60,
+ "seeds": [
+  0
+ ],
+ "quick": false,
+ "seconds": 1650.1
+}

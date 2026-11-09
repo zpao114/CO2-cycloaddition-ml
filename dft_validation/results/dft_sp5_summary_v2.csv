@@ -1,0 +1,6 @@
+substrate,sp_energy_ha,homo_ev,lumo_ev,gap_ev,charge,mult,geometry_source,convergence
+PO,-2955.848704,-4.4221,0.9932,5.4153,-1,1,ts_PO.xyz,fully_converged
+ECH,-3415.413950,-4.5871,0.6450,5.2321,-1,1,ts_ECH.xyz,fully_converged
+SO,-3147.544983,-4.2398,-0.2184,4.0214,-1,1,ts_SO.xyz,fully_converged
+CHO,-3072.184771,-4.1855,-3.5511,0.6344,-1,1,ts_CHO.xyz,fully_converged
+IGE,-3148.982891,-5.0994,0.1012,5.2006,-1,1,ts_IGE_v2.xyz,fully_converged

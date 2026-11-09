@@ -323,3 +323,91 @@ src/data/chem_registry.py
 src/data/probe_ext_names.py
 src/data_overview.py
 src/shap_explanation.py
+
+# ============================================================
+# Paper-promised data whitelist (manuscript Data Availability +
+# SI "Source" entries). Re-include ONLY the exact cited data
+# files; every other file under these directories stays ignored.
+# Parent directories are re-included step by step because Git
+# cannot re-include a file whose parent directory is excluded.
+# ============================================================
+
+# ---- results/ tree (the results/ directory is excluded above) ----
+!results/
+results/*
+# main modeling table (1,033 reactions)
+!results/results_cho_diagnostic/
+results/results_cho_diagnostic/*
+!results/results_cho_diagnostic/co2_drfp_xtb_extended.csv
+# SHAP comprehensive evidence
+!results/results_shap_comprehensive/
+results/results_shap_comprehensive/*
+!results/results_shap_comprehensive/cross_model/
+results/results_shap_comprehensive/cross_model/*
+!results/results_shap_comprehensive/cross_model/cho_contrast.csv
+!results/results_shap_comprehensive/cross_model/cho_removed_control.csv
+!results/results_shap_comprehensive/catalyst_control/
+results/results_shap_comprehensive/catalyst_control/*
+!results/results_shap_comprehensive/catalyst_control/catalyst_control_summary.csv
+!results/results_shap_comprehensive/condition_control/
+results/results_shap_comprehensive/condition_control/*
+!results/results_shap_comprehensive/condition_control/stratification_summary.csv
+!results/results_shap_comprehensive/condition_control/residualisation_summary.csv
+# SI benchmark incl. year-based OOD
+!results/results_si/
+results/results_si/*
+!results/results_si/year_ood_benchmark.csv
+# Y-randomization (100 permutations)
+!results/results_y_randomization_v4_100perm/
+results/results_y_randomization_v4_100perm/*
+!results/results_y_randomization_v4_100perm/y_randomization_v4_100perm_results.csv
+
+# ---- root-level results_* directories ----
+# Leading "/" anchors every rule to the repository root, so these
+# patterns cannot match same-named directories nested under results/.
+# per-substrate SHAP bootstrap CI
+!/results_step4_5_v2/
+/results_step4_5_v2/*
+!/results_step4_5_v2/per_substrate_shap_v2/
+/results_step4_5_v2/per_substrate_shap_v2/*
+!/results_step4_5_v2/per_substrate_shap_v2/bootstrap_substrate_shap_ci.csv
+# evaluation controls: label permutation + lambda dose-response
+!/results_eval_controls/
+/results_eval_controls/*
+!/results_eval_controls/label_permutation_summary.json
+!/results_eval_controls/label_permutation.csv
+!/results_eval_controls/lambda_dose_response.csv
+# hybrid diagnostic LOSO per-reaction predictions
+!/results_step7_improved_loso/
+/results_step7_improved_loso/*
+!/results_step7_improved_loso/loso_predictions.csv
+# Wilcoxon statistical test
+!/results_statistical_test/
+/results_statistical_test/*
+!/results_statistical_test/wilcoxon_results.csv
+# protocol comparison matrix
+!/results_step4/
+/results_step4/*
+!/results_step4/summary_protocol.csv
+# lambda scan
+!/results_lambda_ablation/
+/results_lambda_ablation/*
+!/results_lambda_ablation/lambda_results.csv
+# DRFP variant ablation
+!/results_best_pipeline/
+/results_best_pipeline/*
+!/results_best_pipeline/drfp_ablation_results.csv
+
+# ---- DFT validation summaries ----
+!dft_validation/results/
+dft_validation/results/*
+!dft_validation/results/dft_sp5_summary_v2.csv
+!dft_validation/results/dft_xtb_calibration_full.csv
+
+# ============================================================
+# Safety guard: never commit the restricted Reaxys export and the
+# local pnpm backup. These were untracked but not ignored, so a
+# plain "git add ." would have swept them in.
+# ============================================================
+data/CO2_cycloaddition.pdf
+/backup/
